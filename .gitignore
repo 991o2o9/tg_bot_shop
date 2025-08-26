@@ -1,0 +1,58 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.Python
+
+# --- Virtual environment ---
+venv/
+env/
+.venv/
+
+# --- IDE / Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# --- Environment files ---
+.env
+.env.local
+*.env.*
+
+# --- Logs ---
+*.log
+logs/
+celerybeat-schedule
+*.pid
+
+# --- Alembic / Migrations cache ---
+migrations/__pycache__/
+migrations/versions/__pycache__/
+migrations/*.pyc
+
+# --- Tests / Coverage ---
+.coverage
+htmlcov/
+.tox/
+pytest_cache/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+
+# --- System ---
+.DS_Store
+Thumbs.db
+
+# --- Other ---
+*.sqlite3
+*.db

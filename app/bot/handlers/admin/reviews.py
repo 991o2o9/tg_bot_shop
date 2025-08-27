@@ -3,7 +3,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
-from sqlalchemy import select
+from sqlalchemy import select, delete
 
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -95,20 +95,59 @@ async def admin_reviews_list(callback: CallbackQuery) -> None:
 	if not reviews:
 		await _safe_edit_cb(callback, "Пока нет отзывов", reply_markup=admin_menu_keyboard().as_markup())
 		return
-	await _safe_edit_cb(callback, f"Всего показано: {len(reviews)}. Последние отзывы отправлены в чат.", reply_markup=admin_menu_keyboard().as_markup())
-	for r in reviews:
+	
+	# First show numbered list with descriptions
+	review_list = []
+	for i, r in enumerate(reviews, 1):
+		media_type_emoji = "🖼" if r.media_type == "photo" else "🎥"
+		caption_text = f" — {r.caption}" if r.caption else ""
+		review_list.append(f"{i}. {media_type_emoji} Отзыв #{r.id}{caption_text}")
+	
+	await _safe_edit_cb(callback, "Список отзывов:\n\n" + "\n".join(review_list))
+	
+	# Then show each review with delete button
+	from aiogram.utils.keyboard import InlineKeyboardBuilder
+	from aiogram.types import InlineKeyboardButton
+	
+	for i, r in enumerate(reviews, 1):
+		# Show review media
 		try:
 			if r.media_type == "photo":
-				await callback.message.answer_photo(r.file_id, caption=r.caption or "")
+				await callback.message.answer_photo(r.file_id, caption=f"Отзыв #{r.id} (№{i} в списке)")
 			else:
-				await callback.message.answer_video(r.file_id, caption=r.caption or "")
+				await callback.message.answer_video(r.file_id, caption=f"Отзыв #{r.id} (№{i} в списке)")
 		except Exception:
 			pass
-	# Добавляем сообщение с клавиатурой внизу, чтобы кнопки были под последним сообщением
+	
+	# Add delete buttons for each review
+	builder = InlineKeyboardBuilder()
+	for i, r in enumerate(reviews, 1):
+		builder.row(
+			InlineKeyboardButton(text=f"🗑 Удалить отзыв №{i} (ID: {r.id})", callback_data=f"admin:review:del:{r.id}")
+		)
+	builder.row(InlineKeyboardButton(text="↩️ Назад", callback_data="admin:open"))
+	await callback.message.answer(f"Всего отзывов: {len(reviews)}. Удалите ненужные кнопками ниже:", reply_markup=builder.as_markup())
+	# already answered above
+
+
+@router.callback_query(F.data.startswith("admin:review:del:"))
+async def admin_review_delete(callback: CallbackQuery) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await callback.answer()
+		return
 	try:
-		await callback.message.answer("↩️ Назад в админ-меню", reply_markup=admin_menu_keyboard().as_markup())
+		await callback.answer()
 	except Exception:
 		pass
-	# already answered above
+	review_id_str = (callback.data or "").rsplit(":", 1)[-1]
+	try:
+		review_id = int(review_id_str)
+	except ValueError:
+		await _safe_edit_cb(callback, "Некорректный ID отзыва", reply_markup=admin_menu_keyboard().as_markup())
+		return
+	async with SessionLocal() as session:
+		await session.execute(delete(Review).where(Review.id == review_id))
+		await session.commit()
+	await _safe_edit_cb(callback, f"Отзыв #{review_id} удалён ✅", reply_markup=admin_menu_keyboard().as_markup())
 
 

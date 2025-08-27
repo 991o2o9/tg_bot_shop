@@ -12,6 +12,7 @@ from app.bot.handlers.user.catalog import router as user_router
 from app.bot.handlers.admin.products import router as admin_router
 from app.bot.handlers.admin.reviews import router as admin_reviews_router
 from app.bot.handlers.admin.branding import router as admin_branding_router
+from app.bot.handlers.admin.managers import router as admin_managers_router
 
 
 def setup_logging() -> None:
@@ -33,7 +34,7 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     ) as bot:
         dp = Dispatcher()
-        dp.include_routers(user_router, admin_router, admin_reviews_router, admin_branding_router)
+        dp.include_routers(user_router, admin_router, admin_reviews_router, admin_branding_router, admin_managers_router)
         logger.info("Bot started")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 

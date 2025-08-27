@@ -21,6 +21,7 @@ class Product(Base):
 	bulk_price: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
 	stock_qty: Mapped[int] = mapped_column(default=0)
 	in_stock: Mapped[bool] = mapped_column(default=True)
+	is_deleted: Mapped[bool] = mapped_column(default=False)
 	photo_file_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
 	category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
 

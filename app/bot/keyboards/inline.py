@@ -73,11 +73,20 @@ def admin_menu_keyboard() -> InlineKeyboardBuilder:
 		InlineKeyboardButton(text="📦 Товары", callback_data="admin:products"),
 	)
 	builder.row(
+		InlineKeyboardButton(text="🗃 Архив товаров", callback_data="admin:products:archived"),
+	)
+	builder.row(
 		InlineKeyboardButton(text="⭐ Добавить отзыв", callback_data="admin:review:add"),
 		InlineKeyboardButton(text="🗂 Отзывы", callback_data="admin:reviews"),
 	)
 	builder.row(
+		InlineKeyboardButton(text="📣 Уведомление", callback_data="admin:notify"),
+	)
+	builder.row(
 		InlineKeyboardButton(text="🎨 Брендинг", callback_data="admin:branding"),
+	)
+	builder.row(
+		InlineKeyboardButton(text="👥 Менеджеры", callback_data="admin:managers"),
 	)
 	builder.row(
 		InlineKeyboardButton(text="🏠 Главная", callback_data="nav:home"),
@@ -158,14 +167,9 @@ def admin_product_edit_keyboard(product_id: int) -> InlineKeyboardBuilder:
 	)
 	builder.row(
 		InlineKeyboardButton(text="🏷 Категория", callback_data=f"admin:edit:category:{product_id}"),
-		InlineKeyboardButton(text="📦 Остаток", callback_data=f"admin:edit:stock:{product_id}"),
 	)
 	builder.row(
-		InlineKeyboardButton(text="📉 Опт.цена", callback_data=f"admin:edit:bulk_price:{product_id}"),
-		InlineKeyboardButton(text="🔢 Опт.порог", callback_data=f"admin:edit:bulk_threshold:{product_id}"),
-	)
-	builder.row(
-		InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin:product:delete:{product_id}"),
+		InlineKeyboardButton(text="🗃 В архив", callback_data=f"admin:product:delete:{product_id}"),
 	)
 	builder.row(
 		InlineKeyboardButton(text="↩️ Назад", callback_data="admin:products"),

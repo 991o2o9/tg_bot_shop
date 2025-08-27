@@ -11,6 +11,15 @@ from app.bot.keyboards.inline import admin_menu_keyboard
 
 
 router = Router(name="admin_branding")
+async def _safe_edit_cb(callback: CallbackQuery, text: str, reply_markup=None) -> None:
+	try:
+		await callback.message.edit_text(text, reply_markup=reply_markup)
+	except Exception:
+		try:
+			await callback.message.edit_caption(caption=text, reply_markup=reply_markup)
+		except Exception:
+			await callback.message.answer(text, reply_markup=reply_markup)
+
 
 
 def _is_admin(user_id: int) -> bool:
@@ -38,6 +47,11 @@ async def _get_or_create_branding() -> Branding:
 
 @router.callback_query(F.data == "admin:branding")
 async def open_branding(callback: CallbackQuery) -> None:
+	# answer early to avoid stale query
+	try:
+		await callback.answer()
+	except Exception:
+		pass
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
 		await callback.answer()
 		return
@@ -58,8 +72,8 @@ async def open_branding(callback: CallbackQuery) -> None:
 	builder.button(text="✏️ Изменить приветствие", callback_data="admin:branding:set_text")
 	builder.button(text="↩️ Назад", callback_data="admin:open")
 	builder.adjust(2)
-	await callback.message.edit_text("\n".join(text_lines), reply_markup=builder.as_markup())
-	await callback.answer()
+	await _safe_edit_cb(callback, "\n".join(text_lines), reply_markup=builder.as_markup())
+	# already answered above
 
 
 @router.callback_query(F.data == "admin:branding:set_logo")
@@ -68,7 +82,7 @@ async def branding_set_logo(callback: CallbackQuery, state: FSMContext) -> None:
 		await callback.answer()
 		return
 	await state.set_state(BrandingStates.wait_logo)
-	await callback.message.edit_text("Отправьте фото логотипа (как фото)")
+	await _safe_edit_cb(callback, "Отправьте фото логотипа (как фото)")
 	await callback.answer()
 
 
@@ -96,7 +110,7 @@ async def branding_set_text(callback: CallbackQuery, state: FSMContext) -> None:
 		await callback.answer()
 		return
 	await state.set_state(BrandingStates.wait_text)
-	await callback.message.edit_text("Отправьте новый приветственный текст")
+	await _safe_edit_cb(callback, "Отправьте новый приветственный текст")
 	await callback.answer()
 
 

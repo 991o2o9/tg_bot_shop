@@ -2,7 +2,7 @@ from aiogram import Router, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -109,7 +109,11 @@ async def open_category(callback: CallbackQuery) -> None:
 
 async def _load_products_by_category(session: AsyncSession, category_id: int) -> list[Product]:
 	result = await session.execute(
-		select(Product).where(Product.category_id == category_id, Product.in_stock == True).order_by(Product.title)
+		select(Product).where(
+			Product.category_id == category_id,
+			Product.in_stock == True,
+			getattr(Product, "is_deleted", False) == False
+		).order_by(Product.title)
 	)
 	return list(result.scalars().all())
 
@@ -223,6 +227,11 @@ async def qty_change(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "nav:home")
 async def nav_home(callback: CallbackQuery) -> None:
+	# Answer early to avoid "query is too old" if subsequent ops take time
+	try:
+		await callback.answer()
+	except Exception:
+		pass
 	user_id = callback.from_user.id  
 	is_admin = False
 	if settings.admin_ids:
@@ -244,21 +253,17 @@ async def nav_home(callback: CallbackQuery) -> None:
 	except Exception:
 		pass
 	if logo_id:
-		if getattr(callback.message, "photo", None):			
-			try:
-				await callback.message.edit_caption(caption=welcome_text, reply_markup=main_menu_keyboard(is_admin).as_markup())
-			except TelegramBadRequest:
-				await _safe_edit(callback, welcome_text, reply_markup=main_menu_keyboard(is_admin).as_markup())
-		else:
-			# no photo in current message → replace with photo to show logo
-			try:
-				await callback.message.delete()
-				await callback.message.answer_photo(logo_id, caption=welcome_text, reply_markup=main_menu_keyboard(is_admin).as_markup())
-			except TelegramBadRequest:
-				await _safe_edit(callback, welcome_text, reply_markup=main_menu_keyboard(is_admin).as_markup())
+		# Always ensure the main screen shows the logo image
+		try:
+			await callback.message.delete()
+		except Exception:
+			pass
+		try:
+			await callback.message.answer_photo(logo_id, caption=welcome_text, reply_markup=main_menu_keyboard(is_admin).as_markup())
+		except TelegramBadRequest:
+			await _safe_edit(callback, welcome_text, reply_markup=main_menu_keyboard(is_admin).as_markup())
 	else:
 		await _safe_edit(callback, welcome_text, reply_markup=main_menu_keyboard(is_admin).as_markup())
-	await callback.answer()
 
 
 @router.callback_query(F.data == "info:open")
@@ -351,7 +356,7 @@ async def nav_category(callback: CallbackQuery) -> None:
 
 
 async def _load_product(session: AsyncSession, product_id: int) -> Product | None:
-	result = await session.execute(select(Product).where(Product.id == product_id))
+	result = await session.execute(select(Product).where(Product.id == product_id, getattr(Product, "is_deleted", False) == False))
 	return result.scalars().first()
 
 
@@ -410,8 +415,24 @@ class CheckoutStates(StatesGroup):
 async def checkout_start(callback: CallbackQuery, state: FSMContext) -> None:
 	await state.clear()
 	await state.set_state(CheckoutStates.phone)
-	await _safe_edit(callback, "Введите телефон")
+	# Offer contact sharing via reply keyboard
+	kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]], resize_keyboard=True, one_time_keyboard=True)
+	try:
+		await callback.message.answer("Отправьте телефон или нажмите '📱 Поделиться контактом'", reply_markup=kb)
+	except Exception:
+		await _safe_edit(callback, "Отправьте телефон или нажмите '📱 Поделиться контактом'")
 	await callback.answer()
+
+
+@router.message(CheckoutStates.phone, F.contact)
+async def checkout_phone_contact(message: Message, state: FSMContext) -> None:
+	phone = getattr(message.contact, "phone_number", "") if getattr(message, "contact", None) else ""
+	if not phone:
+		await message.answer("Не удалось получить контакт. Введите номер вручную")
+		return
+	await state.update_data(phone=phone)
+	await state.set_state(CheckoutStates.confirm)
+	await message.answer("Подтвердите оформление заказа: отправьте 'Да' или 'Нет'", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(CheckoutStates.phone)
@@ -432,7 +453,7 @@ async def checkout_phone(message: Message, state: FSMContext) -> None:
 				u.last_name = message.from_user.last_name if message.from_user else u.last_name  # type: ignore[union-attr]
 				u.phone = phone
 	await state.set_state(CheckoutStates.confirm)
-	await message.answer("Подтвердите оформление заказа: отправьте 'Да' или 'Нет'")
+	await message.answer("Подтвердите оформление заказа: отправьте 'Да' или 'Нет'", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(CheckoutStates.confirm)
@@ -461,7 +482,6 @@ async def checkout_confirm(message: Message, state: FSMContext) -> None:
 			await message.answer("Корзина пуста")
 			await state.clear()
 			return
-		# finalize order
 		order.status = "submitted"
 		order.customer_name = None  # type: ignore[assignment]
 		order.customer_phone = data.get("phone")  # type: ignore[assignment]
@@ -469,18 +489,23 @@ async def checkout_confirm(message: Message, state: FSMContext) -> None:
 	await state.clear()
 	from app.bot.keyboards.inline import main_menu_keyboard as _main_kb
 	await message.answer("Заказ оформлен ✅", reply_markup=_main_kb(is_admin=False).as_markup())
-	# notify manager
-	if settings.manager_chat_id:
-		text_lines = [f"Новый заказ #{order.id}", f"Телефон: {data.get('phone')}", ""]
-		for item, product in pairs:
-			text_lines.append(
-				f"{product.title} — {item.quantity} x {float(item.unit_price):.2f} = {float(item.unit_price) * item.quantity:.2f}"
-			)
-		text = "\n".join(text_lines)
+	text_lines = [f"Новый заказ #{order.id}", f"Телефон: {data.get('phone')}", ""]
+	for item, product in pairs:
+		text_lines.append(
+			f"{product.title} — {item.quantity} x {float(item.unit_price):.2f} = {float(item.unit_price) * item.quantity:.2f}"
+		)
+	text = "\n".join(text_lines)
+	from app.models.manager import Manager
+	async with SessionLocal() as session:
+		res = await session.execute(select(Manager.user_id))
+		manager_ids = [row[0] for row in res.all()]
+	if not manager_ids and getattr(settings, "manager_chat_id", None):
+		manager_ids = [int(settings.manager_chat_id)]
+	from app.bot.keyboards.inline import manager_order_keyboard
+	kb = manager_order_keyboard(user_id)
+	for mid in manager_ids:
 		try:
-			from app.bot.keyboards.inline import manager_order_keyboard
-			kb = manager_order_keyboard(user_id)
-			await message.bot.send_message(settings.manager_chat_id, text, reply_markup=kb.as_markup())
+			await message.bot.send_message(mid, text, reply_markup=kb.as_markup())
 		except Exception:
 			pass
 

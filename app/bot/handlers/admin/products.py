@@ -4,10 +4,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
-from sqlalchemy import select
+from sqlalchemy import select, update, delete
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.product import Category, Product
+from app.models.order import OrderItem
 from app.bot.keyboards.inline import admin_categories_keyboard, admin_menu_keyboard
 
 
@@ -62,9 +63,14 @@ async def admin_open(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
 		await callback.answer()
 		return
+	# answer early to avoid stale query problems
+	try:
+		await callback.answer()
+	except Exception:
+		pass
 	from app.bot.keyboards.inline import admin_menu_keyboard as _kb  # local import
 	await _safe_edit_cb(callback, "Админ меню", reply_markup=_kb().as_markup())
-	await callback.answer()
+	# already answered above
 
 
 @router.callback_query(F.data == "admin:product:add")
@@ -72,10 +78,14 @@ async def admin_product_add_from_menu(callback: CallbackQuery, state: FSMContext
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
 		await callback.answer()
 		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
 	await state.clear()
 	await state.set_state(ProductCreateStates.title)
 	await _safe_edit_cb(callback, "Введите название товара")
-	await callback.answer()
+	# already answered above
 
 
 @router.message(Command("addcat"))
@@ -105,9 +115,13 @@ async def admin_category_add_open(callback: CallbackQuery, state: FSMContext) ->
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
 		await callback.answer()
 		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
 	await state.set_state(AdminCategoryStates.name)
 	await _safe_edit_cb(callback, "Отправьте название категории")
-	await callback.answer()
+	# already answered above
 
 
 @router.message(Command("listcat"))
@@ -130,13 +144,27 @@ async def admin_category_list(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
 		await callback.answer()
 		return
-	from app.bot.keyboards.inline import admin_menu_keyboard as _kb
+	try:
+		await callback.answer()
+	except Exception:
+		pass
 	async with SessionLocal() as session:
 		result = await session.execute(select(Category).order_by(Category.name))
 		cats = list(result.scalars().all())
-	text = "Категорий нет" if not cats else "\n".join(f"{c.id}: {c.name}" for c in cats)
-	await _safe_edit_cb(callback, text, reply_markup=_kb().as_markup())
-	await callback.answer()
+	from aiogram.utils.keyboard import InlineKeyboardBuilder
+	builder = InlineKeyboardBuilder()
+	if not cats:
+		builder.button(text="➕ Добавить", callback_data="admin:category:add")
+		builder.button(text="↩️ Назад", callback_data="admin:open")
+		builder.adjust(2)
+		await _safe_edit_cb(callback, "Категорий нет", reply_markup=builder.as_markup())
+		return
+	for c in cats:
+		builder.button(text=f"📂 {c.name}", callback_data=f"admin:category:open:{c.id}")
+	builder.adjust(1)
+	builder.button(text="↩️ Назад", callback_data="admin:open")
+	await _safe_edit_cb(callback, "Категории:", reply_markup=builder.as_markup())
+	# already answered above
 
 
 class ProductCreateStates(StatesGroup):
@@ -151,6 +179,10 @@ class ProductCreateStates(StatesGroup):
 
 class AdminCategoryStates(StatesGroup):
 	name = State()
+
+
+class AdminCategoryEditStates(StatesGroup):
+	rename = State()
 
 
 @router.message(AdminCategoryStates.name)
@@ -173,6 +205,91 @@ async def admin_category_create_name(message: Message, state: FSMContext) -> Non
 		await session.commit()
 	await state.clear()
 	await message.answer("Категория добавлена", reply_markup=admin_menu_keyboard().as_markup())
+
+
+@router.callback_query(F.data.startswith("admin:category:open:"))
+async def admin_category_open(callback: CallbackQuery) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await callback.answer()
+		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
+	cid = int((callback.data or "").rsplit(":", 1)[-1])
+	from aiogram.utils.keyboard import InlineKeyboardBuilder
+	builder = InlineKeyboardBuilder()
+	builder.button(text="✏️ Переименовать", callback_data=f"admin:category:rename:{cid}")
+	builder.button(text="🗑 Удалить", callback_data=f"admin:category:delete:{cid}")
+	builder.button(text="↩️ Назад", callback_data="admin:category:list")
+	builder.adjust(2)
+	await _safe_edit_cb(callback, f"Категория ID {cid}", reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("admin:category:rename:"))
+async def admin_category_rename_start(callback: CallbackQuery, state: FSMContext) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await callback.answer()
+		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
+	cid = int((callback.data or "").rsplit(":", 1)[-1])
+	await state.set_state(AdminCategoryEditStates.rename)
+	await state.update_data(category_id=cid)
+	await _safe_edit_cb(callback, "Отправьте новое название категории")
+
+
+@router.message(AdminCategoryEditStates.rename)
+async def admin_category_rename_save(message: Message, state: FSMContext) -> None:
+	if not _is_admin(message.from_user.id):  # type: ignore[union-attr]
+		return
+	new_name = (message.text or "").strip()
+	if not new_name:
+		await message.answer("Название не может быть пустым. Введите ещё раз")
+		return
+	data = await state.get_data()
+	cid = int(data.get("category_id"))
+	async with SessionLocal() as session:
+		async with session.begin():
+			# check duplicate
+			exists = await session.execute(select(Category).where(Category.name == new_name))
+			if exists.scalars().first():
+				await message.answer("Такая категория уже существует", reply_markup=admin_menu_keyboard().as_markup())
+				await state.clear()
+				return
+			res = await session.execute(select(Category).where(Category.id == cid))
+			cat = res.scalars().first()
+			if not cat:
+				await message.answer("Категория не найдена", reply_markup=admin_menu_keyboard().as_markup())
+				await state.clear()
+				return
+			cat.name = new_name
+		await session.commit()
+	await state.clear()
+	await message.answer("Категория переименована", reply_markup=admin_menu_keyboard().as_markup())
+
+
+@router.callback_query(F.data.startswith("admin:category:delete:"))
+async def admin_category_delete(callback: CallbackQuery) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await callback.answer()
+		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
+	cid = int((callback.data or "").rsplit(":", 1)[-1])
+	async with SessionLocal() as session:
+		async with session.begin():
+			# detach products
+			await session.execute(update(Product).where(Product.category_id == cid).values(category_id=None))
+			# delete category
+			await session.execute(delete(Category).where(Category.id == cid))
+		await session.commit()
+	from app.bot.keyboards.inline import admin_menu_keyboard as _kb
+	await _safe_edit_cb(callback, "Категория удалена", reply_markup=_kb().as_markup())
 
 
 @router.message(ProductCreateStates.title, F.text)
@@ -242,6 +359,10 @@ async def pc_availability(callback: CallbackQuery, state: FSMContext) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
 		await callback.answer()
 		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
 	parts = (callback.data or "").split(":")  # type: ignore[union-attr]
 	in_stock = parts[-1] == "yes"
 	await state.update_data(in_stock=in_stock)
@@ -257,8 +378,8 @@ async def pc_availability(callback: CallbackQuery, state: FSMContext) -> None:
 	from app.bot.keyboards.inline import admin_categories_keyboard as _kb
 	kb = _kb([(c.id, c.name) for c in cats])
 	await state.set_state(ProductCreateStates.category)
-	await callback.message.edit_text("Выберите категорию", reply_markup=kb.as_markup())
-	await callback.answer()
+	await _safe_edit_cb(callback, "Выберите категорию", reply_markup=kb.as_markup())
+	# already answered above
 
 
 @router.callback_query(ProductCreateStates.category, F.data.startswith("admincat:"))
@@ -266,6 +387,10 @@ async def pc_category(callback: CallbackQuery, state: FSMContext) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
 		await callback.answer()
 		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
 	_, cid = callback.data.split(":", 1)  # type: ignore[union-attr]
 	await state.update_data(category_id=int(cid))
 	await state.set_state(ProductCreateStates.save)
@@ -276,7 +401,7 @@ async def pc_category(callback: CallbackQuery, state: FSMContext) -> None:
 		f"Цена: {float(data.get('price', 0)):.2f}",
 		f"Категория ID: {data.get('category_id')}",
 	]
-	await callback.message.edit_text("\n".join([x for x in preview if x]))
+	await _safe_edit_cb(callback, "\n".join([x for x in preview if x]))
 	# persist
 	async with SessionLocal() as session:
 		async with session.begin():
@@ -291,12 +416,14 @@ async def pc_category(callback: CallbackQuery, state: FSMContext) -> None:
 			session.add(product)
 		await session.commit()
 	await state.clear()
-	await callback.message.edit_text("Товар создан ✅", reply_markup=admin_menu_keyboard().as_markup())
-	await callback.answer()
+	await _safe_edit_cb(callback, "Товар создан ✅", reply_markup=admin_menu_keyboard().as_markup())
+	# already answered above
 
 
 # --- Appended: products list and edit handlers ---
 from app.bot.keyboards.inline import admin_products_keyboard, admin_product_edit_keyboard
+from app.bot.keyboards.inline import admin_menu_keyboard as _admin_menu_kb
+from aiogram.types import InlineKeyboardButton
 
 
 @router.callback_query(F.data == "admin:products")
@@ -304,16 +431,116 @@ async def admin_products(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
 		await callback.answer()
 		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
 	async with SessionLocal() as session:
 		res = await session.execute(select(Product).order_by(Product.title))
 		prods = list(res.scalars().all())
 	if not prods:
-		await callback.message.edit_text("Товаров нет", reply_markup=admin_menu_keyboard().as_markup())
-		await callback.answer()
+		await _safe_edit_cb(callback, "Товаров нет", reply_markup=admin_menu_keyboard().as_markup())
 		return
 	kb = admin_products_keyboard([(p.id, p.title) for p in prods])
 	await _safe_edit_cb(callback, "Выберите товар для редактирования:", reply_markup=kb.as_markup())
-	await callback.answer()
+	# already answered above
+@router.callback_query(F.data == "admin:products:archived")
+async def admin_products_archived(callback: CallbackQuery) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await callback.answer()
+		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
+	async with SessionLocal() as session:
+		res = await session.execute(select(Product).where(getattr(Product, "is_deleted", False) == True).order_by(Product.title))
+		prods = list(res.scalars().all())
+	if not prods:
+		await _safe_edit_cb(callback, "Архив пуст", reply_markup=_admin_menu_kb().as_markup())
+		return
+	from aiogram.utils.keyboard import InlineKeyboardBuilder
+	builder = InlineKeyboardBuilder()
+	for p in prods:
+		builder.button(text=f"📦 {p.title}", callback_data=f"admin:arch:open:{p.id}")
+	builder.adjust(1)
+	builder.row(InlineKeyboardButton(text="↩️ Назад", callback_data="admin:open"))
+	await _safe_edit_cb(callback, "Архив товаров", reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("admin:arch:open:"))
+async def admin_archived_open(callback: CallbackQuery) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await callback.answer()
+		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
+	pid = int((callback.data or "").rsplit(":", 1)[-1])
+	from aiogram.utils.keyboard import InlineKeyboardBuilder
+	builder = InlineKeyboardBuilder()
+	builder.row(InlineKeyboardButton(text="♻️ Восстановить", callback_data=f"admin:arch:restore:{pid}"))
+	builder.row(InlineKeyboardButton(text="🗑 Удалить навсегда", callback_data=f"admin:arch:delete:{pid}"))
+	builder.row(InlineKeyboardButton(text="↩️ Назад", callback_data="admin:products:archived"))
+	await _safe_edit_cb(callback, f"Товар #{pid} в архиве", reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("admin:arch:restore:"))
+async def admin_archived_restore(callback: CallbackQuery) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await callback.answer()
+		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
+	pid = int((callback.data or "").rsplit(":", 1)[-1])
+	async with SessionLocal() as session:
+		async with session.begin():
+			res = await session.execute(select(Product).where(Product.id == pid))
+			prod = res.scalars().first()
+			if not prod:
+				await _safe_edit_cb(callback, "Товар не найден", reply_markup=_admin_menu_kb().as_markup())
+				return
+			prod.is_deleted = False  # type: ignore[attr-defined]
+			# не включаем автоматически в продажу, админ решит сам
+	await _safe_edit_cb(callback, "Товар восстановлен", reply_markup=_admin_menu_kb().as_markup())
+
+
+@router.callback_query(F.data.startswith("admin:arch:delete:"))
+async def admin_archived_delete_permanently(callback: CallbackQuery) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await callback.answer()
+		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
+	pid = int((callback.data or "").rsplit(":", 1)[-1])
+	from sqlalchemy import delete as sa_delete
+	async with SessionLocal() as session:
+		async with session.begin():
+			# удалить связанные позиции заказов, чтобы не нарушить FK
+			await session.execute(sa_delete(OrderItem).where(OrderItem.product_id == pid))
+			# удалить сам товар
+			await session.execute(sa_delete(Product).where(Product.id == pid))
+		await session.commit()
+	# вернуться к списку архива
+	async with SessionLocal() as session:
+		res = await session.execute(select(Product).where(getattr(Product, "is_deleted", False) == True).order_by(Product.title))
+		prods = list(res.scalars().all())
+	from aiogram.utils.keyboard import InlineKeyboardBuilder
+	builder = InlineKeyboardBuilder()
+	if not prods:
+		builder.row(InlineKeyboardButton(text="↩️ Назад", callback_data="admin:open"))
+		await _safe_edit_cb(callback, "Архив пуст", reply_markup=builder.as_markup())
+		return
+	for p in prods:
+		builder.button(text=f"📦 {p.title}", callback_data=f"admin:arch:open:{p.id}")
+	builder.adjust(1)
+	builder.row(InlineKeyboardButton(text="↩️ Назад", callback_data="admin:open"))
+	await _safe_edit_cb(callback, "Товар удалён навсегда", reply_markup=builder.as_markup())
 
 
 @router.callback_query(F.data.startswith("adminprod:"))
@@ -342,6 +569,48 @@ async def admin_product_open(callback: CallbackQuery) -> None:
 	await callback.answer()
 
 
+@router.callback_query(F.data.startswith("admin:product:delete:"))
+async def admin_product_delete(callback: CallbackQuery) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await callback.answer()
+		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
+	pid_str = (callback.data or "").rsplit(":", 1)[-1]
+	try:
+		pid = int(pid_str)
+	except ValueError:
+		await _safe_edit_cb(callback, "Некорректный ID товара", reply_markup=admin_menu_keyboard().as_markup())
+		return
+	async with SessionLocal() as session:
+		async with session.begin():
+			res = await session.execute(select(Product).where(Product.id == pid))
+			prod = res.scalars().first()
+			if not prod:
+				await _safe_edit_cb(callback, "Товар не найден", reply_markup=admin_menu_keyboard().as_markup())
+				return
+			# мягкое удаление: помечаем как удалённый
+			if hasattr(prod, "is_deleted"):
+				setattr(prod, "is_deleted", True)
+			else:
+				# если поля нет, просто скрываем из наличия
+				if hasattr(prod, "in_stock"):
+					setattr(prod, "in_stock", False)
+		await session.commit()
+	# после удаления вернёмся к списку товаров
+	async with SessionLocal() as session:
+		res = await session.execute(select(Product).where(getattr(Product, "is_deleted", False) == False).order_by(Product.title))
+		prods = list(res.scalars().all())
+	from app.bot.keyboards.inline import admin_products_keyboard as _prods_kb
+	if not prods:
+		await _safe_edit_cb(callback, "Товар удалён. Товаров нет", reply_markup=admin_menu_keyboard().as_markup())
+		return
+	kb = _prods_kb([(p.id, p.title) for p in prods])
+	await _safe_edit_cb(callback, "Товар удалён", reply_markup=kb.as_markup())
+
+
 class ProductEditStates(StatesGroup):
 	edit_title = State()
 	edit_desc = State()
@@ -349,6 +618,12 @@ class ProductEditStates(StatesGroup):
 	edit_stock = State()
 	edit_bulk_price = State()
 	edit_bulk_threshold = State()
+	edit_photo = State()
+	edit_category = State()
+
+
+class NotifyStates(StatesGroup):
+	notify_text = State()
 
 
 def _parse_edit(data: str) -> tuple[str, int]:
@@ -389,7 +664,7 @@ async def edit_desc_start(callback: CallbackQuery, state: FSMContext) -> None:
 	_, pid = _parse_edit(callback.data or "")
 	await state.set_state(ProductEditStates.edit_desc)
 	await state.update_data(product_id=pid)
-	await _safe_edit_cb(callback, "Введите новое описание (или '-' чтобы очистить)")
+	await _safe_edit_cb(callback, "Отправьте новое описание (или '-' чтобы очистить)")
 	await callback.answer()
 
 
@@ -397,7 +672,8 @@ async def edit_desc_start(callback: CallbackQuery, state: FSMContext) -> None:
 async def edit_desc_save(message: Message, state: FSMContext) -> None:
 	data = await state.get_data()
 	pid = int(data.get("product_id"))
-	desc = None if (message.text or "").strip() == "-" else message.text
+	text = (message.text or "").strip()
+	new_desc = None if text == "-" else text
 	async with SessionLocal() as session:
 		async with session.begin():
 			res = await session.execute(select(Product).where(Product.id == pid))
@@ -406,7 +682,7 @@ async def edit_desc_save(message: Message, state: FSMContext) -> None:
 				await message.answer("Товар не найден", reply_markup=admin_menu_keyboard().as_markup())
 				await state.clear()
 				return
-			prod.description = desc
+			prod.description = new_desc
 		await session.commit()
 	await state.clear()
 	await message.answer("Описание обновлено", reply_markup=admin_product_edit_keyboard(pid).as_markup())
@@ -427,9 +703,9 @@ async def edit_price_save(message: Message, state: FSMContext) -> None:
 	pid = int(data.get("product_id"))
 	price_text = (message.text or "").replace(",", ".").strip()
 	try:
-		price = float(price_text)
+		new_price = float(price_text)
 	except ValueError:
-		await message.answer("Неверная цена")
+		await message.answer("Неверная цена. Введите ещё раз, например 199.99")
 		return
 	async with SessionLocal() as session:
 		async with session.begin():
@@ -439,30 +715,26 @@ async def edit_price_save(message: Message, state: FSMContext) -> None:
 				await message.answer("Товар не найден", reply_markup=admin_menu_keyboard().as_markup())
 				await state.clear()
 				return
-			prod.price = price
+			prod.price = new_price
 		await session.commit()
 	await state.clear()
 	await message.answer("Цена обновлена", reply_markup=admin_product_edit_keyboard(pid).as_markup())
 
 
-@router.callback_query(F.data.startswith("admin:edit:stock:"))
-async def edit_stock_start(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data.startswith("admin:edit:photo:"))
+async def edit_photo_start(callback: CallbackQuery, state: FSMContext) -> None:
 	_, pid = _parse_edit(callback.data or "")
-	await state.set_state(ProductEditStates.edit_stock)
+	await state.set_state(ProductEditStates.edit_photo)
 	await state.update_data(product_id=pid)
-	await _safe_edit_cb(callback, "Введите остаток на складе (целое число)")
+	await _safe_edit_cb(callback, "Отправьте новое фото товара (как фото, не как файл)")
 	await callback.answer()
 
 
-@router.message(ProductEditStates.edit_stock)
-async def edit_stock_save(message: Message, state: FSMContext) -> None:
+@router.message(ProductEditStates.edit_photo, F.photo)
+async def edit_photo_save(message: Message, state: FSMContext) -> None:
 	data = await state.get_data()
 	pid = int(data.get("product_id"))
-	try:
-		qty = int((message.text or "").strip())
-	except ValueError:
-		await message.answer("Неверное число")
-		return
+	file_id = message.photo[-1].file_id  # type: ignore[index]
 	async with SessionLocal() as session:
 		async with session.begin():
 			res = await session.execute(select(Product).where(Product.id == pid))
@@ -471,122 +743,88 @@ async def edit_stock_save(message: Message, state: FSMContext) -> None:
 				await message.answer("Товар не найден", reply_markup=admin_menu_keyboard().as_markup())
 				await state.clear()
 				return
-			prod.stock_qty = qty
+			prod.photo_file_id = file_id
 		await session.commit()
 	await state.clear()
-	await message.answer("Остаток обновлён", reply_markup=admin_product_edit_keyboard(pid).as_markup())
+	await message.answer("Фото обновлено", reply_markup=admin_product_edit_keyboard(pid).as_markup())
 
 
-@router.callback_query(F.data.startswith("admin:edit:bulk_price:"))
-async def edit_bulk_price_start(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data.startswith("admin:edit:category:"))
+async def edit_category_start(callback: CallbackQuery, state: FSMContext) -> None:
 	_, pid = _parse_edit(callback.data or "")
-	await state.set_state(ProductEditStates.edit_bulk_price)
+	await state.set_state(ProductEditStates.edit_category)
 	await state.update_data(product_id=pid)
-	await _safe_edit_cb(callback, "Введите оптовую цену, например 149.99 (или '-' чтобы очистить)")
-	await callback.answer()
-
-
-@router.message(ProductEditStates.edit_bulk_price)
-async def edit_bulk_price_save(message: Message, state: FSMContext) -> None:
-	data = await state.get_data()
-	pid = int(data.get("product_id"))
-	text = (message.text or "").strip()
-	bulk_price = None
-	if text != "-":
-		try:
-			bulk_price = float(text.replace(",", "."))
-		except ValueError:
-			await message.answer("Неверная цена")
-			return
 	async with SessionLocal() as session:
-		async with session.begin():
-			res = await session.execute(select(Product).where(Product.id == pid))
-			prod = res.scalars().first()
-			if not prod:
-				await message.answer("Товар не найден", reply_markup=admin_menu_keyboard().as_markup())
-				await state.clear()
-				return
-			prod.bulk_price = bulk_price
-		await session.commit()
-	await state.clear()
-	await message.answer("Оптовая цена обновлена", reply_markup=admin_product_edit_keyboard(pid).as_markup())
-
-
-@router.callback_query(F.data.startswith("admin:edit:bulk_threshold:"))
-async def edit_bulk_threshold_start(callback: CallbackQuery, state: FSMContext) -> None:
-	_, pid = _parse_edit(callback.data or "")
-	await state.set_state(ProductEditStates.edit_bulk_threshold)
-	await state.update_data(product_id=pid)
-	await _safe_edit_cb(callback, "Введите оптовый порог (целое число, '-' чтобы очистить)")
-	await callback.answer()
-
-
-@router.message(ProductEditStates.edit_bulk_threshold)
-async def edit_bulk_threshold_save(message: Message, state: FSMContext) -> None:
-	data = await state.get_data()
-	pid = int(data.get("product_id"))
-	text = (message.text or "").strip()
-	bulk_threshold = None
-	if text != "-":
-		try:
-			bulk_threshold = int(text)
-		except ValueError:
-			await message.answer("Неверное число")
-			return
-	async with SessionLocal() as session:
-		async with session.begin():
-			res = await session.execute(select(Product).where(Product.id == pid))
-			prod = res.scalars().first()
-			if not prod:
-				await message.answer("Товар не найден", reply_markup=admin_menu_keyboard().as_markup())
-				await state.clear()
-				return
-			prod.bulk_threshold = bulk_threshold
-		await session.commit()
-	await state.clear()
-	await message.answer("Оптовый порог обновлён", reply_markup=admin_product_edit_keyboard(pid).as_markup())
-
-
-@router.callback_query(F.data.startswith("admin:product:delete:"))
-async def admin_product_delete(callback: CallbackQuery) -> None:
-	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		res = await session.execute(select(Category).order_by(Category.name))
+		cats = list(res.scalars().all())
+	if not cats:
+		await _safe_edit_cb(callback, "Сначала создайте категорию", reply_markup=admin_menu_keyboard().as_markup())
+		await state.clear()
 		await callback.answer()
 		return
-	parts = (callback.data or "").split(":")
-	pid = int(parts[-1])
-	async with SessionLocal() as session:
-		async with session.begin():
-			res = await session.execute(select(Product).where(Product.id == pid))
-			prod = res.scalars().first()
-			if not prod:
-				from app.bot.keyboards.inline import admin_menu_keyboard as _kb
-				await _safe_edit_cb(callback, "Товар не найден", reply_markup=_kb().as_markup())
-				await callback.answer()
-				return
-			await session.delete(prod)
-	await _safe_edit_cb(callback, "Товар удалён", reply_markup=admin_menu_keyboard().as_markup())
+	kb = admin_categories_keyboard([(c.id, c.name) for c in cats])
+	await _safe_edit_cb(callback, "Выберите новую категорию", reply_markup=kb.as_markup())
 	await callback.answer()
 
 
-@router.callback_query(F.data.startswith("admin:edit:toggle_instock:"))
-async def edit_toggle_instock(callback: CallbackQuery) -> None:
-	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
-		return
-	parts = (callback.data or "").split(":")
-	pid = int(parts[-1])
+@router.callback_query(ProductEditStates.edit_category, F.data.startswith("admincat:"))
+async def edit_category_save(callback: CallbackQuery, state: FSMContext) -> None:
+	parts = (callback.data or "").split(":")  # type: ignore[union-attr]
+	cid = int(parts[-1])
+	data = await state.get_data()
+	pid = int(data.get("product_id"))
 	async with SessionLocal() as session:
 		async with session.begin():
 			res = await session.execute(select(Product).where(Product.id == pid))
 			prod = res.scalars().first()
 			if not prod:
 				await _safe_edit_cb(callback, "Товар не найден", reply_markup=admin_menu_keyboard().as_markup())
+				await state.clear()
 				await callback.answer()
 				return
-			prod.in_stock = not bool(getattr(prod, "in_stock", True))
+			prod.category_id = cid
 		await session.commit()
-	await _safe_edit_cb(callback, "Наличие переключено", reply_markup=admin_product_edit_keyboard(pid).as_markup())
+	await state.clear()
+	await _safe_edit_cb(callback, "Категория обновлена", reply_markup=admin_product_edit_keyboard(pid).as_markup())
 	await callback.answer()
+
+
+@router.callback_query(F.data == "admin:notify")
+async def admin_notify_open_callback(callback: CallbackQuery, state: FSMContext) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await callback.answer()
+		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
+	await state.clear()
+	await state.set_state(NotifyStates.notify_text)
+	await _safe_edit_cb(callback, "Введите текст уведомления (будет отправлен всем пользователям)")
+
+
+@router.message(NotifyStates.notify_text)
+async def admin_notify_send(message: Message, state: FSMContext) -> None:
+	if not _is_admin(message.from_user.id):  # type: ignore[union-attr]
+		return
+	text = (message.text or "").strip()
+	if not text:
+		await message.answer("Текст пуст. Отправьте текст уведомления")
+		return
+	from app.models.user import User as AppUser
+	async with SessionLocal() as session:
+		res = await session.execute(select(AppUser.id))
+		user_ids = [row[0] for row in res.all()]
+	sent = 0
+	errors = 0
+	for uid in user_ids:
+		try:
+			await message.bot.send_message(uid, text)
+			sent += 1
+		except Exception:
+			errors += 1
+	await state.clear()
+	await message.answer(f"Отправлено: {sent}. Ошибок: {errors}", reply_markup=admin_menu_keyboard().as_markup())
 
 
 

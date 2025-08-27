@@ -12,6 +12,15 @@ from app.bot.keyboards.inline import admin_menu_keyboard
 
 
 router = Router(name="admin_reviews")
+async def _safe_edit_cb(callback: CallbackQuery, text: str, reply_markup=None) -> None:
+	try:
+		await callback.message.edit_text(text, reply_markup=reply_markup)
+	except Exception:
+		try:
+			await callback.message.edit_caption(caption=text, reply_markup=reply_markup)
+		except Exception:
+			await callback.message.answer(text, reply_markup=reply_markup)
+
 
 
 def _is_admin(user_id: int) -> bool:
@@ -31,10 +40,14 @@ async def review_add_open(callback: CallbackQuery, state: FSMContext) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
 		await callback.answer()
 		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
 	await state.clear()
 	await state.set_state(ReviewStates.wait_media)
-	await callback.message.edit_text("Отправьте фото или видео отзыва (как фото/видео, не как файл)")
-	await callback.answer()
+	await _safe_edit_cb(callback, "Отправьте фото или видео отзыва (как фото/видео, не как файл)")
+	# already answered above
 
 
 @router.message(ReviewStates.wait_media, F.photo | F.video)
@@ -72,17 +85,17 @@ async def admin_reviews_list(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
 		await callback.answer()
 		return
+	try:
+		await callback.answer()
+	except Exception:
+		pass
 	async with SessionLocal() as session:
 		res = await session.execute(select(Review).order_by(Review.created_at.desc()).limit(10))
 		reviews = list(res.scalars().all())
 	if not reviews:
-		await callback.message.edit_text("Пока нет отзывов", reply_markup=admin_menu_keyboard().as_markup())
-		await callback.answer()
+		await _safe_edit_cb(callback, "Пока нет отзывов", reply_markup=admin_menu_keyboard().as_markup())
 		return
-	await callback.message.edit_text(
-		f"Всего показано: {len(reviews)}. Последние отзывы отправлены в чат.",
-		reply_markup=admin_menu_keyboard().as_markup(),
-	)
+	await _safe_edit_cb(callback, f"Всего показано: {len(reviews)}. Последние отзывы отправлены в чат.", reply_markup=admin_menu_keyboard().as_markup())
 	for r in reviews:
 		try:
 			if r.media_type == "photo":
@@ -96,6 +109,6 @@ async def admin_reviews_list(callback: CallbackQuery) -> None:
 		await callback.message.answer("↩️ Назад в админ-меню", reply_markup=admin_menu_keyboard().as_markup())
 	except Exception:
 		pass
-	await callback.answer()
+	# already answered above
 
 

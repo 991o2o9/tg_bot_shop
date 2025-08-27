@@ -23,9 +23,11 @@ class OrderItem(Base):
 	id: Mapped[int] = mapped_column(primary_key=True)
 	order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"))
 	product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+	flavor_id: Mapped[int | None] = mapped_column(ForeignKey("flavors.id"), nullable=True)
 	quantity: Mapped[int]
 	unit_price: Mapped[float] = mapped_column(Numeric(10, 2))
 
 	order: Mapped[Order] = relationship(back_populates="items")
+	flavor: Mapped["Flavor"] = relationship("Flavor", back_populates="order_items")
 
 

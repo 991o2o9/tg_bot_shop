@@ -114,8 +114,27 @@ def products_keyboard_with_nav(products: list[tuple[int, str]], category_id: int
 
 
 
-def product_view_keyboard(product_id: int, category_id: int | None, qty: int = 1, enabled: bool = True) -> InlineKeyboardBuilder:
-	builder = product_qty_keyboard(product_id, qty, enabled)
+def product_view_keyboard(product_id: int, category_id: int | None, qty: int = 1, enabled: bool = True, has_flavors: bool = False) -> InlineKeyboardBuilder:
+	builder = InlineKeyboardBuilder()
+	
+	# Add quantity controls
+	builder.row(
+		InlineKeyboardButton(text="➖", callback_data=f"qty:dec:{product_id}:{qty}"),
+		InlineKeyboardButton(text=f"{qty}", callback_data="noop"),
+		InlineKeyboardButton(text="➕", callback_data=f"qty:inc:{product_id}:{qty}"),
+	)
+	
+	# If product has flavors, show flavor selection first and disable add to cart
+	if has_flavors:
+		builder.row(InlineKeyboardButton(text="🍃 Выбрать вкус", callback_data=f"flavor:select:{product_id}:{qty}"))
+		# Add to cart button is disabled until flavor is selected
+		builder.row(InlineKeyboardButton(text="❌ Сначала выберите вкус", callback_data="noop"))
+	else:
+		# Standard add to cart button for products without flavors
+		btn_text = "🛒 В корзину" if enabled else "❌ Нет в наличии"
+		btn_cb = f"cart:add:{product_id}:{qty}" if enabled else "noop"
+		builder.row(InlineKeyboardButton(text=btn_text, callback_data=btn_cb))
+	
 	if category_id is not None:
 		builder.row(
 			InlineKeyboardButton(text="⬅️ К товарам", callback_data=f"nav:category:{category_id}"),
@@ -126,7 +145,31 @@ def product_view_keyboard(product_id: int, category_id: int | None, qty: int = 1
 			InlineKeyboardButton(text="⬅️ К категориям", callback_data="nav:categories"),
 			InlineKeyboardButton(text="🏠 Главная", callback_data="nav:home"),
 		)
-	builder.row(InlineKeyboardButton(text="🛒 Корзина", callback_data="cart:view"))
+	return builder
+
+
+
+def flavor_selection_keyboard(product_id: int, flavor_id: int, qty: int = 1, enabled: bool = True) -> InlineKeyboardBuilder:
+	builder = InlineKeyboardBuilder()
+	
+	# Add quantity controls
+	builder.row(
+		InlineKeyboardButton(text="➖", callback_data=f"flavor:qty:dec:{product_id}:{flavor_id}:{qty}"),
+		InlineKeyboardButton(text=f"{qty}", callback_data="noop"),
+		InlineKeyboardButton(text="➕", callback_data=f"flavor:qty:inc:{product_id}:{flavor_id}:{qty}"),
+	)
+	
+	# Add to cart button with flavor
+	btn_text = "🛒 В корзину" if enabled else "❌ Нет в наличии"
+	btn_cb = f"flavor:add:{product_id}:{flavor_id}:{qty}" if enabled else "noop"
+	builder.row(InlineKeyboardButton(text=btn_text, callback_data=btn_cb))
+	
+	# Change flavor button
+	builder.row(InlineKeyboardButton(text="🍃 Изменить вкус", callback_data=f"flavor:select:{product_id}:{qty}"))
+	
+	# Back to product button
+	builder.row(InlineKeyboardButton(text="⬅️ Назад к товару", callback_data=f"product:{product_id}"))
+	
 	return builder
 
 

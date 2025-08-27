@@ -8,6 +8,7 @@ from sqlalchemy import select, update, delete
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.product import Category, Product
+from app.models.flavor import Flavor
 from app.models.order import OrderItem
 from app.bot.keyboards.inline import admin_categories_keyboard, admin_menu_keyboard
 
@@ -17,12 +18,17 @@ router = Router(name="admin_products")
 
 async def _safe_edit_cb(callback: CallbackQuery, text: str, reply_markup=None) -> None:
 	try:
-		await callback.message.edit_caption(caption=text, reply_markup=reply_markup)
+		await callback.message.edit_text(text, reply_markup=reply_markup)
 	except TelegramBadRequest:
-		try:
-			await callback.message.edit_text(text, reply_markup=reply_markup)
-		except TelegramBadRequest:
-			await callback.message.answer(text, reply_markup=reply_markup)
+		await callback.message.answer(text, reply_markup=reply_markup)
+
+
+async def _safe_answer(callback: CallbackQuery) -> None:
+	"""Safely call callback.answer() with error handling for old queries."""
+	try:
+		await callback.answer()
+	except TelegramBadRequest:
+		pass  # Ignore old query errors
 
 
 def _is_admin(user_id: int) -> bool:
@@ -61,11 +67,11 @@ async def send_all(message: Message) -> None:
 @router.callback_query(F.data == "admin:open")
 async def admin_open(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	# answer early to avoid stale query problems
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	from app.bot.keyboards.inline import admin_menu_keyboard as _kb  # local import
@@ -76,10 +82,10 @@ async def admin_open(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "admin:product:add")
 async def admin_product_add_from_menu(callback: CallbackQuery, state: FSMContext) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	await state.clear()
@@ -113,10 +119,10 @@ async def add_category(message: Message) -> None:
 @router.callback_query(F.data == "admin:category:add")
 async def admin_category_add_open(callback: CallbackQuery, state: FSMContext) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	await state.set_state(AdminCategoryStates.name)
@@ -142,10 +148,10 @@ async def list_categories(message: Message) -> None:
 @router.callback_query(F.data == "admin:category:list")
 async def admin_category_list(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	async with SessionLocal() as session:
@@ -170,11 +176,11 @@ async def admin_category_list(callback: CallbackQuery) -> None:
 class ProductCreateStates(StatesGroup):
 	title = State()
 	description = State()
+	flavors = State()
 	photo = State()
 	price = State()
 	availability = State()
 	category = State()
-	save = State()
 
 
 class AdminCategoryStates(StatesGroup):
@@ -210,10 +216,10 @@ async def admin_category_create_name(message: Message, state: FSMContext) -> Non
 @router.callback_query(F.data.startswith("admin:category:open:"))
 async def admin_category_open(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	cid = int((callback.data or "").rsplit(":", 1)[-1])
@@ -229,10 +235,10 @@ async def admin_category_open(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("admin:category:rename:"))
 async def admin_category_rename_start(callback: CallbackQuery, state: FSMContext) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	cid = int((callback.data or "").rsplit(":", 1)[-1])
@@ -274,10 +280,10 @@ async def admin_category_rename_save(message: Message, state: FSMContext) -> Non
 @router.callback_query(F.data.startswith("admin:category:delete:"))
 async def admin_category_delete(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	cid = int((callback.data or "").rsplit(":", 1)[-1])
@@ -307,117 +313,89 @@ async def pc_description(message: Message, state: FSMContext) -> None:
 		return
 	desc = None if (message.text or "").strip() == "-" else message.text
 	await state.update_data(description=desc)
-	await state.set_state(ProductCreateStates.photo)
-	await message.answer("Пришлите фото товара (как фото, не как файл). Можно пропустить '-' ")
-
-
-@router.message(ProductCreateStates.photo, F.photo)
-async def pc_photo(message: Message, state: FSMContext) -> None:
-	if not _is_admin(message.from_user.id):  # type: ignore[union-attr]
-		return
-	file_id = message.photo[-1].file_id  # type: ignore[index]
-	await state.update_data(photo_file_id=file_id)
-	await state.set_state(ProductCreateStates.price)
-	await message.answer("Введите цену, например 199.99")
-
-
-@router.message(ProductCreateStates.photo, F.text)
-async def pc_photo_skip(message: Message, state: FSMContext) -> None:
-	if not _is_admin(message.from_user.id):  # type: ignore[union-attr]
-		return
-	if (message.text or "").strip() == "-":
-		await state.update_data(photo_file_id=None)
-		await state.set_state(ProductCreateStates.price)
-		await message.answer("Введите цену, например 199.99")
-	else:
-		await message.answer("Пришлите фото или '-' для пропуска")
-
-
-@router.message(ProductCreateStates.price, F.text)
-async def pc_price(message: Message, state: FSMContext) -> None:
-	if not _is_admin(message.from_user.id):  # type: ignore[union-attr]
-		return
-	price_text = (message.text or "").replace(",", ".").strip()
-	try:
-		price = float(price_text)
-	except ValueError:
-		await message.answer("Неверная цена. Введите ещё раз, например 199.99")
-		return
-	await state.update_data(price=price)
-	# ask availability via inline buttons
+	
+	# Transition to flavors management
+	await state.set_state(ProductCreateStates.flavors)
+	
 	from aiogram.utils.keyboard import InlineKeyboardBuilder
-	kb = InlineKeyboardBuilder()
-	kb.button(text="✅ В наличии", callback_data="admin:availability:yes")
-	kb.button(text="❌ Нет в наличии", callback_data="admin:availability:no")
-	kb.adjust(2)
-	await state.set_state(ProductCreateStates.availability)
-	await message.answer("Товар в наличии?", reply_markup=kb.as_markup())
+	from aiogram.types import InlineKeyboardButton
+	
+	builder = InlineKeyboardBuilder()
+	builder.row(InlineKeyboardButton(text="➕ Добавить вкусы", callback_data="admin:product:add_flavors"))
+	builder.row(InlineKeyboardButton(text="⏭️ Пропустить вкусы", callback_data="admin:product:skip_flavors"))
+	builder.row(InlineKeyboardButton(text="↩️ Назад", callback_data="admin:open"))
+	
+	await message.answer("Хотите добавить вкусы к товару? Это полезно для одноразок и других товаров с вариантами.", reply_markup=builder.as_markup())
 
 
-@router.callback_query(ProductCreateStates.availability, F.data.startswith("admin:availability:"))
-async def pc_availability(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(ProductCreateStates.flavors, F.data == "admin:product:add_flavors")
+async def pc_add_flavors(callback: CallbackQuery, state: FSMContext) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
-	parts = (callback.data or "").split(":")  # type: ignore[union-attr]
-	in_stock = parts[-1] == "yes"
-	await state.update_data(in_stock=in_stock)
-	# proceed to category selection
-	async with SessionLocal() as session:
-		res = await session.execute(select(Category).order_by(Category.name))
-		cats = list(res.scalars().all())
-	if not cats:
-		await callback.message.edit_text("Сначала создайте категорию: /addcat Название", reply_markup=admin_menu_keyboard().as_markup())
-		await state.clear()
-		await callback.answer()
-		return
-	from app.bot.keyboards.inline import admin_categories_keyboard as _kb
-	kb = _kb([(c.id, c.name) for c in cats])
-	await state.set_state(ProductCreateStates.category)
-	await _safe_edit_cb(callback, "Выберите категорию", reply_markup=kb.as_markup())
-	# already answered above
+	
+	# Initialize flavors list in state
+	await state.update_data(flavors=[])
+	await _safe_edit_cb(callback, "Введите название первого вкуса (например, 'Мята', 'Клубника', 'Ваниль')\n\nИли отправьте 'Готово' когда добавите все вкусы.")
 
 
-@router.callback_query(ProductCreateStates.category, F.data.startswith("admincat:"))
-async def pc_category(callback: CallbackQuery, state: FSMContext) -> None:
-	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+@router.message(ProductCreateStates.flavors, F.text)
+async def pc_flavors_name(message: Message, state: FSMContext) -> None:
+	if not _is_admin(message.from_user.id):  # type: ignore[union-attr]
 		return
-	try:
-		await callback.answer()
-	except Exception:
-		pass
-	_, cid = callback.data.split(":", 1)  # type: ignore[union-attr]
-	await state.update_data(category_id=int(cid))
-	await state.set_state(ProductCreateStates.save)
+	
+	text = (message.text or "").strip()
+	
+	if text.lower() in ["готово", "done", "finish"]:
+		# Finish adding flavors and proceed to photo
+		data = await state.get_data()
+		flavors = data.get('flavors', [])
+		
+		if not flavors:
+			await message.answer("Вкусы не добавлены. Переходим к фото товара.")
+		
+		await state.set_state(ProductCreateStates.photo)
+		await message.answer("Пришлите фото товара (как фото, не как файл). Можно пропустить '-' ")
+		return
+	
+	if not text:
+		await message.answer("Название вкуса не может быть пустым. Введите ещё раз.")
+		return
+	
+	# Add flavor to state
 	data = await state.get_data()
-	preview = [
-		f"<b>{data.get('title')}</b>",
-		data.get('description') or "",
-		f"Цена: {float(data.get('price', 0)):.2f}",
-		f"Категория ID: {data.get('category_id')}",
-	]
-	await _safe_edit_cb(callback, "\n".join([x for x in preview if x]))
-	# persist
-	async with SessionLocal() as session:
-		async with session.begin():
-			product = Product(
-				title=data.get('title'),
-				description=data.get('description'),
-				price=float(data.get('price', 0)),
-				category_id=int(data.get('category_id')),
-				photo_file_id=data.get('photo_file_id'),
-				in_stock=bool(data.get('in_stock', True)),
-			)
-			session.add(product)
-		await session.commit()
-	await state.clear()
-	await _safe_edit_cb(callback, "Товар создан ✅", reply_markup=admin_menu_keyboard().as_markup())
-	# already answered above
+	flavors = data.get('flavors', [])
+	flavors.append(text)
+	await state.update_data(flavors=flavors)
+	
+	# Show current flavors and ask for more
+	flavors_text = "\n".join([f"• {f}" for f in flavors])
+	await message.answer(f"Вкус '{text}' добавлен!\n\nТекущие вкусы:\n{flavors_text}\n\nВведите следующий вкус или отправьте 'Готово' для завершения.")
+
+
+
+
+
+@router.callback_query(ProductCreateStates.flavors, F.data == "admin:product:skip_flavors")
+async def pc_skip_flavors(callback: CallbackQuery, state: FSMContext) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await _safe_answer(callback)
+		return
+	try:
+		await _safe_answer(callback)
+	except Exception:
+		pass
+	
+	await state.update_data(flavors=[])
+	await state.set_state(ProductCreateStates.photo)
+	await _safe_edit_cb(callback, "Пришлите фото товара (как фото, не как файл). Можно пропустить '-' ")
+
+
+
 
 
 # --- Appended: products list and edit handlers ---
@@ -429,14 +407,15 @@ from aiogram.types import InlineKeyboardButton
 @router.callback_query(F.data == "admin:products")
 async def admin_products(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	async with SessionLocal() as session:
-		res = await session.execute(select(Product).order_by(Product.title))
+		# Show only active products (not in archive)
+		res = await session.execute(select(Product).where(getattr(Product, "is_deleted", False) == False).order_by(Product.title))
 		prods = list(res.scalars().all())
 	if not prods:
 		await _safe_edit_cb(callback, "Товаров нет", reply_markup=admin_menu_keyboard().as_markup())
@@ -447,10 +426,10 @@ async def admin_products(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "admin:products:archived")
 async def admin_products_archived(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	async with SessionLocal() as session:
@@ -471,10 +450,10 @@ async def admin_products_archived(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("admin:arch:open:"))
 async def admin_archived_open(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	pid = int((callback.data or "").rsplit(":", 1)[-1])
@@ -489,10 +468,10 @@ async def admin_archived_open(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("admin:arch:restore:"))
 async def admin_archived_restore(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	pid = int((callback.data or "").rsplit(":", 1)[-1])
@@ -511,10 +490,10 @@ async def admin_archived_restore(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("admin:arch:delete:"))
 async def admin_archived_delete_permanently(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	pid = int((callback.data or "").rsplit(":", 1)[-1])
@@ -546,7 +525,7 @@ async def admin_archived_delete_permanently(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("adminprod:"))
 async def admin_product_open(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	_, pid = callback.data.split(":", 1)  # type: ignore[union-attr]
 	product_id = int(pid)
@@ -566,16 +545,16 @@ async def admin_product_open(callback: CallbackQuery) -> None:
 			await _safe_edit_cb(callback, f"Редактирование товара ID {product_id}", reply_markup=kb.as_markup())
 	else:
 		await _safe_edit_cb(callback, f"Редактирование товара ID {product_id}", reply_markup=kb.as_markup())
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 @router.callback_query(F.data.startswith("admin:product:delete:"))
 async def admin_product_delete(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	pid_str = (callback.data or "").rsplit(":", 1)[-1]
@@ -637,7 +616,7 @@ async def edit_title_start(callback: CallbackQuery, state: FSMContext) -> None:
 	await state.set_state(ProductEditStates.edit_title)
 	await state.update_data(product_id=pid)
 	await _safe_edit_cb(callback, "Введите новое название")
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 @router.message(ProductEditStates.edit_title)
@@ -665,7 +644,7 @@ async def edit_desc_start(callback: CallbackQuery, state: FSMContext) -> None:
 	await state.set_state(ProductEditStates.edit_desc)
 	await state.update_data(product_id=pid)
 	await _safe_edit_cb(callback, "Отправьте новое описание (или '-' чтобы очистить)")
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 @router.message(ProductEditStates.edit_desc)
@@ -694,7 +673,7 @@ async def edit_price_start(callback: CallbackQuery, state: FSMContext) -> None:
 	await state.set_state(ProductEditStates.edit_price)
 	await state.update_data(product_id=pid)
 	await _safe_edit_cb(callback, "Введите новую цену, например 199.99")
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 @router.message(ProductEditStates.edit_price)
@@ -727,7 +706,7 @@ async def edit_photo_start(callback: CallbackQuery, state: FSMContext) -> None:
 	await state.set_state(ProductEditStates.edit_photo)
 	await state.update_data(product_id=pid)
 	await _safe_edit_cb(callback, "Отправьте новое фото товара (как фото, не как файл)")
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 @router.message(ProductEditStates.edit_photo, F.photo)
@@ -760,11 +739,11 @@ async def edit_category_start(callback: CallbackQuery, state: FSMContext) -> Non
 	if not cats:
 		await _safe_edit_cb(callback, "Сначала создайте категорию", reply_markup=admin_menu_keyboard().as_markup())
 		await state.clear()
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	kb = admin_categories_keyboard([(c.id, c.name) for c in cats])
 	await _safe_edit_cb(callback, "Выберите новую категорию", reply_markup=kb.as_markup())
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 @router.callback_query(ProductEditStates.edit_category, F.data.startswith("admincat:"))
@@ -780,22 +759,22 @@ async def edit_category_save(callback: CallbackQuery, state: FSMContext) -> None
 			if not prod:
 				await _safe_edit_cb(callback, "Товар не найден", reply_markup=admin_menu_keyboard().as_markup())
 				await state.clear()
-				await callback.answer()
+				await _safe_answer(callback)
 				return
 			prod.category_id = cid
 		await session.commit()
 	await state.clear()
 	await _safe_edit_cb(callback, "Категория обновлена", reply_markup=admin_product_edit_keyboard(pid).as_markup())
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 @router.callback_query(F.data == "admin:notify")
 async def admin_notify_open_callback(callback: CallbackQuery, state: FSMContext) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	await state.clear()
@@ -825,6 +804,124 @@ async def admin_notify_send(message: Message, state: FSMContext) -> None:
 			errors += 1
 	await state.clear()
 	await message.answer(f"Отправлено: {sent}. Ошибок: {errors}", reply_markup=admin_menu_keyboard().as_markup())
+
+
+@router.message(ProductCreateStates.photo, F.photo)
+async def pc_photo(message: Message, state: FSMContext) -> None:
+	if not _is_admin(message.from_user.id):  # type: ignore[union-attr]
+		return
+	file_id = message.photo[-1].file_id  # type: ignore[index]
+	await state.update_data(photo_file_id=file_id)
+	await state.set_state(ProductCreateStates.price)
+	await message.answer("Введите цену, например 199.99")
+
+
+@router.message(ProductCreateStates.photo, F.text)
+async def pc_photo_skip(message: Message, state: FSMContext) -> None:
+	if not _is_admin(message.from_user.id):  # type: ignore[union-attr]
+		return
+	if (message.text or "").strip() == "-":
+		await state.update_data(photo_file_id=None)
+		await state.set_state(ProductCreateStates.price)
+		await message.answer("Введите цену, например 199.99")
+	else:
+		await message.answer("Пришлите фото или '-' для пропуска")
+
+
+@router.message(ProductCreateStates.price, F.text)
+async def pc_price(message: Message, state: FSMContext) -> None:
+	if not _is_admin(message.from_user.id):  # type: ignore[union-attr]
+		return
+	price_text = (message.text or "").replace(",", ".").strip()
+	try:
+		price = float(price_text)
+	except ValueError:
+		await message.answer("Неверная цена. Введите ещё раз, например 199.99")
+		return
+	await state.update_data(price=price)
+	# ask availability via inline buttons
+	from aiogram.utils.keyboard import InlineKeyboardBuilder
+	kb = InlineKeyboardBuilder()
+	kb.button(text="✅ В наличии", callback_data="admin:availability:yes")
+	kb.button(text="❌ Нет в наличии", callback_data="admin:availability:no")
+	kb.adjust(2)
+	await state.set_state(ProductCreateStates.availability)
+	await message.answer("Товар в наличии?", reply_markup=kb.as_markup())
+
+
+@router.callback_query(ProductCreateStates.availability, F.data.startswith("admin:availability:"))
+async def pc_availability(callback: CallbackQuery, state: FSMContext) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await _safe_answer(callback)
+		return
+	try:
+		await _safe_answer(callback)
+	except Exception:
+		pass
+	parts = (callback.data or "").split(":")  # type: ignore[union-attr]
+	in_stock = parts[-1] == "yes"
+	await state.update_data(in_stock=in_stock)
+	# proceed to category selection
+	async with SessionLocal() as session:
+		res = await session.execute(select(Category).order_by(Category.name))
+		cats = list(res.scalars().all())
+	if not cats:
+		await callback.message.edit_text("Сначала создайте категорию: /addcat Название", reply_markup=admin_menu_keyboard().as_markup())
+		await state.clear()
+		await _safe_answer(callback)
+		return
+	from app.bot.keyboards.inline import admin_categories_keyboard as _kb
+	kb = _kb([(c.id, c.name) for c in cats])
+	await state.set_state(ProductCreateStates.category)
+	await _safe_edit_cb(callback, "Выберите категорию", reply_markup=kb.as_markup())
+	# already answered above
+
+
+@router.callback_query(ProductCreateStates.category, F.data.startswith("admincat:"))
+async def pc_category(callback: CallbackQuery, state: FSMContext) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await _safe_answer(callback)
+		return
+	try:
+		await _safe_answer(callback)
+	except Exception:
+		pass
+	_, cid = callback.data.split(":", 1)  # type: ignore[union-attr]
+	await state.update_data(category_id=int(cid))
+	
+	# Create product immediately after category selection
+	data = await state.get_data()
+	
+	async with SessionLocal() as session:
+		async with session.begin():
+			# Create product
+			product = Product(
+				title=data.get('title'),
+				description=data.get('description'),
+				price=float(data.get('price', 0)),
+				category_id=int(data.get('category_id')),
+				photo_file_id=data.get('photo_file_id'),
+				in_stock=bool(data.get('in_stock', True)),
+			)
+			session.add(product)
+			await session.flush()  # Get product ID
+			
+			# Create flavors if any
+			flavors = data.get('flavors', [])
+			if flavors:
+				from app.models.flavor import Flavor
+				for flavor_name in flavors:
+					flavor = Flavor(
+						name=flavor_name,
+						product_id=product.id,
+						is_available=True
+					)
+					session.add(flavor)
+			
+			await session.commit()
+	
+	await state.clear()
+	await _safe_edit_cb(callback, f"✅ Товар '{data.get('title')}' успешно создан!", reply_markup=admin_menu_keyboard().as_markup())
 
 
 

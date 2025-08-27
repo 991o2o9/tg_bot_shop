@@ -4,6 +4,7 @@ from .order import Order, OrderItem
 from .review import Review
 from .branding import Branding
 from .manager import Manager
+from .flavor import Flavor
 
 __all__ = [
 	"User",
@@ -14,5 +15,6 @@ __all__ = [
     "Review",
     "Branding",
     "Manager",
+    "Flavor",
 ]
 

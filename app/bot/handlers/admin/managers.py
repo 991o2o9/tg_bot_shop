@@ -3,6 +3,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select, delete
+from aiogram.exceptions import TelegramBadRequest
 
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -27,20 +28,25 @@ class ManagerStates(StatesGroup):
 async def _safe_edit_cb(callback: CallbackQuery, text: str, reply_markup=None) -> None:
 	try:
 		await callback.message.edit_text(text, reply_markup=reply_markup)
-	except Exception:
-		try:
-			await callback.message.edit_caption(caption=text, reply_markup=reply_markup)
-		except Exception:
-			await callback.message.answer(text, reply_markup=reply_markup)
+	except TelegramBadRequest:
+		await callback.message.answer(text, reply_markup=reply_markup)
+
+
+async def _safe_answer(callback: CallbackQuery) -> None:
+	"""Safely call callback.answer() with error handling for old queries."""
+	try:
+		await _safe_answer(callback)
+	except TelegramBadRequest:
+		pass  # Ignore old query errors
 
 
 @router.callback_query(F.data == "admin:managers")
 async def managers_open(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	# list managers with inline delete buttons
@@ -67,11 +73,11 @@ async def managers_open(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "admin:managers:add")
 async def managers_add_start(callback: CallbackQuery, state: FSMContext) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	await state.set_state(ManagerStates.wait_user_id)
 	await _safe_edit_cb(callback, "Отправьте user_id менеджера (число). Он должен нажать /start боту.")
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 @router.message(ManagerStates.wait_user_id)
@@ -121,10 +127,10 @@ async def managers_delete(message: Message) -> None:
 @router.callback_query(F.data.startswith("admin:managers:del:"))
 async def managers_delete_cb(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	uid_str = (callback.data or "").rsplit(":", 1)[-1]

@@ -4,6 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
 from sqlalchemy import select, delete
+from aiogram.exceptions import TelegramBadRequest
 
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -15,12 +16,16 @@ router = Router(name="admin_reviews")
 async def _safe_edit_cb(callback: CallbackQuery, text: str, reply_markup=None) -> None:
 	try:
 		await callback.message.edit_text(text, reply_markup=reply_markup)
-	except Exception:
-		try:
-			await callback.message.edit_caption(caption=text, reply_markup=reply_markup)
-		except Exception:
-			await callback.message.answer(text, reply_markup=reply_markup)
+	except TelegramBadRequest:
+		await callback.message.answer(text, reply_markup=reply_markup)
 
+
+async def _safe_answer(callback: CallbackQuery) -> None:
+	"""Safely call callback.answer() with error handling for old queries."""
+	try:
+		await _safe_answer(callback)
+	except TelegramBadRequest:
+		pass  # Ignore old query errors
 
 
 def _is_admin(user_id: int) -> bool:
@@ -38,10 +43,10 @@ class ReviewStates(StatesGroup):
 @router.callback_query(F.data == "admin:review:add")
 async def review_add_open(callback: CallbackQuery, state: FSMContext) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	await state.clear()
@@ -83,10 +88,10 @@ async def review_save(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "admin:reviews")
 async def admin_reviews_list(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	async with SessionLocal() as session:
@@ -133,10 +138,10 @@ async def admin_reviews_list(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("admin:review:del:"))
 async def admin_review_delete(callback: CallbackQuery) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	review_id_str = (callback.data or "").rsplit(":", 1)[-1]

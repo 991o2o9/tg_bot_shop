@@ -1,5 +1,5 @@
 from sqlalchemy import ForeignKey, Numeric, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.session import Base
 
 
@@ -24,5 +24,8 @@ class Product(Base):
 	is_deleted: Mapped[bool] = mapped_column(default=False)
 	photo_file_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
 	category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
+	
+	# Relationships
+	flavors: Mapped[list["Flavor"]] = relationship("Flavor", back_populates="product", cascade="all, delete-orphan")
 
 

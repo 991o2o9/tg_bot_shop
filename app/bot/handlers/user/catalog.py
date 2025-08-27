@@ -16,6 +16,7 @@ from app.bot.keyboards.inline import (
 	product_view_keyboard,
     main_menu_keyboard,
     info_menu_keyboard,
+    flavor_selection_keyboard,
 )
 from app.db.session import SessionLocal
 from app.models.order import Order, OrderItem
@@ -32,6 +33,14 @@ async def _safe_edit(callback: CallbackQuery, text: str, reply_markup=None) -> N
 		await callback.message.edit_text(text, reply_markup=reply_markup)
 	except TelegramBadRequest:
 		await callback.message.answer(text, reply_markup=reply_markup)
+
+
+async def _safe_answer(callback: CallbackQuery) -> None:
+	"""Safely call callback.answer() with error handling for old queries."""
+	try:
+		await callback.answer()
+	except TelegramBadRequest:
+		pass  # Ignore old query errors
 
 
 @router.message(CommandStart())
@@ -85,7 +94,7 @@ async def open_catalog(callback: CallbackQuery) -> None:
 	else:
 		kb = categories_keyboard_with_nav([(c.id, c.name) for c in categories])
 		await _safe_edit(callback, "Выберите категорию:", reply_markup=kb.as_markup())
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 async def _load_categories(session: AsyncSession) -> list[Category]:
@@ -95,8 +104,9 @@ async def _load_categories(session: AsyncSession) -> list[Category]:
 
 @router.callback_query(F.data.startswith("category:"))
 async def open_category(callback: CallbackQuery) -> None:
-	_, category_id_str = callback.data.split(":", 1)
-	category_id = int(category_id_str)
+	# data format: category:<category_id>
+	parts = (callback.data or "").split(":")
+	category_id = int(parts[1])
 	async with SessionLocal() as session:
 		products = await _load_products_by_category(session, category_id)
 	if not products:
@@ -104,7 +114,7 @@ async def open_category(callback: CallbackQuery) -> None:
 	else:
 		kb = products_keyboard_with_nav([(p.id, p.title) for p in products], category_id)
 		await _safe_edit(callback, "Выберите товар:", reply_markup=kb.as_markup())
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 async def _load_products_by_category(session: AsyncSession, category_id: int) -> list[Product]:
@@ -120,17 +130,34 @@ async def _load_products_by_category(session: AsyncSession, category_id: int) ->
 
 @router.callback_query(F.data.startswith("product:"))
 async def open_product(callback: CallbackQuery) -> None:
-	_, product_id_str = callback.data.split(":", 1) 
-	product_id = int(product_id_str)
+	# data format: product:<product_id>
+	parts = (callback.data or "").split(":")
+	product_id = int(parts[1])
 	async with SessionLocal() as session:
 		product = await _load_product(session, product_id)
 	if not product:
 		await _safe_edit(callback, "Товар не найден.")
-		await callback.answer()
+		await _safe_answer(callback)
 		return
+	
+	# Check if product has flavors
+	from app.models.flavor import Flavor
+	flavors_res = await session.execute(select(Flavor).where(Flavor.product_id == product_id, Flavor.is_available == True))
+	flavors = list(flavors_res.scalars().all())
+	
 	qty = 1
 	text_lines = _product_text(product, qty)
-	kb = product_view_keyboard(product.id, product.category_id, qty, enabled=getattr(product, "in_stock", True))
+	
+	# Add flavors info right after description
+	if flavors:
+		text_lines.insert(3, "")  # Add empty line after description
+		text_lines.insert(4, "🍃 <b>Доступные вкусы:</b>")
+		for flavor in flavors:
+			text_lines.insert(5, f"• {flavor.name}")
+		text_lines.insert(5 + len(flavors), "")  # Add empty line after flavors
+		text_lines.insert(6 + len(flavors), "Выберите вкус и количество, затем добавьте в корзину")
+	
+	kb = product_view_keyboard(product.id, product.category_id, qty, enabled=getattr(product, "in_stock", True), has_flavors=bool(flavors))
 	if product.photo_file_id:
 		try:
 			await callback.message.delete()
@@ -139,7 +166,7 @@ async def open_product(callback: CallbackQuery) -> None:
 			await callback.message.edit_text("\n".join(text_lines), reply_markup=kb.as_markup())
 	else:
 		await callback.message.edit_text("\n".join(text_lines), reply_markup=kb.as_markup())
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 def _calc_price(product: Product, qty: int) -> float:
@@ -154,12 +181,39 @@ def _product_text(product: Product, qty: int) -> list[str]:
 	if product.description:
 		lines.append(product.description)
 		lines.append("")
+	
+	# Add flavors info if available (this will be populated by the calling function)
+	# The flavors are added by the open_product function after calling this function
+	
 	unit_price = _calc_price(product, qty)
 	lines.append(f"Цена: <b>{unit_price:.2f}</b>")
 	if qty > 1:
 		lines.append(f"Итого: <b>{unit_price*qty:.2f}</b>")
 	avail = "Есть" if getattr(product, "in_stock", True) else "Нет"
 	lines.extend(["", f"Наличие: <b>{avail}</b>"])
+	return lines
+
+
+def _product_with_flavor_text(product: Product, flavor, qty: int) -> list[str]:
+	"""Generate product text with selected flavor information"""
+	lines = [f"<b>{product.title}</b>", ""]
+	if product.description:
+		lines.append(product.description)
+		lines.append("")
+	
+	# Add selected flavor info
+	lines.append("🍃 <b>Выбранный вкус:</b>")
+	lines.append(f"• {flavor.name}")
+	lines.append("")
+	
+	unit_price = _calc_price(product, qty)
+	lines.append(f"Цена: <b>{unit_price:.2f}</b>")
+	if qty > 1:
+		lines.append(f"Итого: <b>{unit_price*qty:.2f}</b>")
+	avail = "Есть" if getattr(product, "in_stock", True) else "Нет"
+	lines.extend(["", f"Наличие: <b>{avail}</b>"])
+	lines.append("")
+	lines.append("Выберите количество и добавьте в корзину:")
 	return lines
 
 
@@ -189,18 +243,44 @@ async def cart_add(callback: CallbackQuery) -> None:
 		if not product:
 			await callback.answer("Товар не найден", show_alert=True)
 			return
+		
+		# Check if product has flavors - if yes, don't allow adding without flavor
+		from app.models.flavor import Flavor
+		flavors_res = await session.execute(select(Flavor).where(Flavor.product_id == product_id, Flavor.is_available == True))
+		flavors = list(flavors_res.scalars().all())
+		
+		if flavors:
+			await callback.answer("Для этого товара необходимо выбрать вкус!", show_alert=True)
+			return
+		
 		item_res = await session.execute(
-			select(OrderItem).where(OrderItem.order_id == order.id, OrderItem.product_id == product_id)
+			select(OrderItem).where(OrderItem.order_id == order.id, OrderItem.product_id == product_id, OrderItem.flavor_id.is_(None))
 		)
 		item = item_res.scalars().first()
 		if item:
+			# If item already exists without flavor, check if product now has flavors
+			if flavors:
+				await callback.answer("Для этого товара необходимо выбрать вкус! Удалите товар из корзины и добавьте заново с выбором вкуса.", show_alert=True)
+				return
 			item.quantity += qty
 		else:
 			unit = _calc_price(product, qty)
 			item = OrderItem(order_id=order.id, product_id=product_id, quantity=qty, unit_price=unit)
 			session.add(item)
 		await session.commit()
-	await callback.answer("В корзине", show_alert=False)
+	
+	# Show confirmation message with "Go to cart" button
+	from aiogram.utils.keyboard import InlineKeyboardBuilder
+	from aiogram.types import InlineKeyboardButton
+	
+	confirmation_text = f"✅ Товар '{product.title}' добавлен в корзину!\n\nКоличество: {qty}\nЦена: {float(product.price):.2f}"
+	
+	builder = InlineKeyboardBuilder()
+	builder.row(InlineKeyboardButton(text="🛒 Перейти в корзину", callback_data="cart:view"))
+	builder.row(InlineKeyboardButton(text="🏷️ Продолжить покупки", callback_data="catalog:open"))
+	
+	await callback.message.answer(confirmation_text, reply_markup=builder.as_markup())
+	await _safe_answer(callback)
 
 
 @router.callback_query(F.data.startswith("qty:"))
@@ -211,25 +291,51 @@ async def qty_change(callback: CallbackQuery) -> None:
 	product_id = int(parts[2])
 	qty = int(parts[3]) if len(parts) > 3 else 1
 	qty = qty + 1 if action == "inc" else max(1, qty - 1)
+	
 	async with SessionLocal() as session:
 		product = await _load_product(session, product_id)
-	if not product:
-		await callback.answer("Товар не найден", show_alert=True)
-		return
+		if not product:
+			await callback.answer("Товар не найден", show_alert=True)
+			return
+		
+		# Check if product has flavors
+		from app.models.flavor import Flavor
+		flavors_res = await session.execute(select(Flavor).where(Flavor.product_id == product_id, Flavor.is_available == True))
+		flavors = list(flavors_res.scalars().all())
+		has_flavors = bool(flavors)
+	
 	text_lines = _product_text(product, qty)
-	kb = product_view_keyboard(product.id, product.category_id, qty, enabled=getattr(product, "in_stock", True))	
+	
+	# Add flavors info right after description (same logic as in open_product)
+	if has_flavors:
+		# Find the right position to insert flavors info
+		# If there's a description, insert after it; otherwise, insert after title
+		if product.description:
+			insert_pos = 3  # After description
+		else:
+			insert_pos = 2  # After title
+		
+		text_lines.insert(insert_pos, "")  # Add empty line
+		text_lines.insert(insert_pos + 1, "🍃 <b>Доступные вкусы:</b>")
+		for flavor in flavors:
+			text_lines.insert(insert_pos + 2, f"• {flavor.name}")
+		text_lines.insert(insert_pos + 2 + len(flavors), "")  # Add empty line after flavors
+		text_lines.insert(insert_pos + 3 + len(flavors), "Выберите вкус и количество, затем добавьте в корзину")
+	
+	kb = product_view_keyboard(product.id, product.category_id, qty, enabled=getattr(product, "in_stock", True), has_flavors=has_flavors)
+	
 	try:
 		await callback.message.edit_caption(caption="\n".join(text_lines), reply_markup=kb.as_markup())
 	except TelegramBadRequest:
 		await _safe_edit(callback, "\n".join(text_lines), reply_markup=kb.as_markup())
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 @router.callback_query(F.data == "nav:home")
 async def nav_home(callback: CallbackQuery) -> None:
 	# Answer early to avoid "query is too old" if subsequent ops take time
 	try:
-		await callback.answer()
+		await _safe_answer(callback)
 	except Exception:
 		pass
 	user_id = callback.from_user.id  
@@ -269,7 +375,7 @@ async def nav_home(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "info:open")
 async def info_open(callback: CallbackQuery) -> None:
 	await _safe_edit(callback, "Раздел: ℹ️ О нас\n\nВыберите тему:", reply_markup=info_menu_keyboard().as_markup())
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 @router.callback_query(F.data.startswith("info:item:"))
@@ -309,7 +415,7 @@ async def info_item(callback: CallbackQuery) -> None:
 			reviews = list(res.scalars().all())
 		if not reviews:
 			await _safe_edit(callback, "Пока нет отзывов", reply_markup=info_item_keyboard().as_markup())
-			await callback.answer()
+			await _safe_answer(callback)
 			return
 		for r in reviews:
 			try:
@@ -320,11 +426,11 @@ async def info_item(callback: CallbackQuery) -> None:
 			except Exception:
 				pass
 		await callback.message.answer("Это последние отзывы", reply_markup=info_item_keyboard().as_markup())
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	text = texts.get(key, "Раздел не найден")
 	await _safe_edit(callback, text, reply_markup=info_item_keyboard().as_markup())
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 @router.callback_query(F.data == "nav:categories")
@@ -333,11 +439,11 @@ async def nav_categories(callback: CallbackQuery) -> None:
 		categories = await _load_categories(session)
 	if not categories:
 		await _safe_edit(callback, "Категории пока не добавлены.")
-		await callback.answer()
+		await _safe_answer(callback)
 		return
 	kb = categories_keyboard_with_nav([(c.id, c.name) for c in categories])
 	await _safe_edit(callback, "Выберите категорию:", reply_markup=kb.as_markup())
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 @router.callback_query(F.data.startswith("nav:category:"))
@@ -345,14 +451,30 @@ async def nav_category(callback: CallbackQuery) -> None:
 	parts = (callback.data or "").split(":")  # type: ignore[union-attr]
 	category_id = int(parts[-1])
 	async with SessionLocal() as session:
-		products = await _load_products_by_category(session, category_id)
+		res = await session.execute(select(Product).where(Product.category_id == category_id, Product.is_deleted == False).order_by(Product.title))
+		products = list(res.scalars().all())
 	if not products:
 		await _safe_edit(callback, "В этой категории пока нет товаров.")
-		await callback.answer()
+		try:
+			await _safe_answer(callback)
+		except TelegramBadRequest:
+			pass  # Ignore old query errors
 		return
-	kb = products_keyboard_with_nav([(p.id, p.title) for p in products], category_id)
-	await _safe_edit(callback, "Выберите товар:", reply_markup=kb.as_markup())
-	await callback.answer()
+	
+	text_lines = [f"<b>Категория: {products[0].category.name}</b>", ""]
+	for product in products:
+		text_lines.append(f"📦 {product.title}")
+		if product.description:
+			text_lines.append(f"   {product.description[:100]}{'...' if len(product.description) > 100 else ''}")
+		text_lines.append("")
+	
+	from app.bot.keyboards.inline import category_products_keyboard as _kb
+	kb = _kb(products)
+	await _safe_edit(callback, "\n".join(text_lines), reply_markup=kb.as_markup())
+	try:
+		await _safe_answer(callback)
+	except TelegramBadRequest:
+		pass  # Ignore old query errors
 
 
 async def _load_product(session: AsyncSession, product_id: int) -> Product | None:
@@ -372,24 +494,61 @@ async def cart_view(callback: CallbackQuery) -> None:
 		order = res.scalars().first()
 		if not order:
 			await _safe_edit(callback, "Корзина пуста", reply_markup=cart_actions_keyboard().as_markup())
-			await callback.answer()
+			await _safe_answer(callback)
 			return
-		res_items = await session.execute(select(OrderItem, Product).join(Product, Product.id == OrderItem.product_id).where(OrderItem.order_id == order.id))
+		
+		# Load order items with products and flavors
+		from app.models.flavor import Flavor
+		res_items = await session.execute(
+			select(OrderItem, Product, Flavor)
+			.join(Product, Product.id == OrderItem.product_id)
+			.outerjoin(Flavor, Flavor.id == OrderItem.flavor_id)
+			.where(OrderItem.order_id == order.id)
+		)
 		pairs = list(res_items.all())
-		text = _format_cart(order, [(oi, p) for (oi, p) in pairs])
+		
+		# Create list of (OrderItem, Product, Flavor) tuples
+		items_with_flavors = []
+		for item, product, flavor in pairs:
+			if flavor:
+				item.flavor = flavor
+			items_with_flavors.append((item, product))
+		
+		text = _format_cart(order, items_with_flavors)
 	await _safe_edit(callback, text, reply_markup=cart_actions_keyboard().as_markup())
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 def _format_cart(order: Order, items: list[tuple[OrderItem, Product]]) -> str:
 	total = 0.0
-	lines: list[str] = ["<b>Корзина</b>"]
-	for item, product in items:
+	lines: list[str] = ["🛒 <b>КОРЗИНА</b>", ""]
+	
+	for i, (item, product) in enumerate(items, 1):
 		unit = _calc_price(product, item.quantity)
 		sum_ = unit * item.quantity
 		total += sum_
-		lines.append(f"{product.title} — {item.quantity} x {unit:.2f} = {sum_:.2f}")
-	lines.append(f"\nИтого: {total:.2f}")
+		
+		# Add item number and separator
+		lines.append(f"<b>{i}.</b>")
+		lines.append(f"📦 {product.title}")
+		
+		# Add flavor information if available
+		if hasattr(item, 'flavor') and item.flavor:
+			lines.append(f"🍃 Вкус: {item.flavor.name}")
+		
+		lines.append(f"   Количество: {item.quantity}")
+		lines.append(f"   Цена за шт: {unit:.2f}")
+		lines.append(f"   Сумма: <b>{sum_:.2f}</b>")
+		
+		# Add separator between items (except after last item)
+		if i < len(items):
+			lines.append("")
+	
+	# Add total section
+	lines.append("")
+	lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	lines.append(f"<b>ИТОГО: {total:.2f}</b>")
+	
 	return "\n".join(lines)
 
 
@@ -403,7 +562,7 @@ async def cart_clear(callback: CallbackQuery) -> None:
 			await session.execute(delete(OrderItem).where(OrderItem.order_id == order_id))
 			await session.commit()
 	await _safe_edit(callback, "Корзина очищена", reply_markup=cart_actions_keyboard().as_markup())
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 class CheckoutStates(StatesGroup):
@@ -421,7 +580,7 @@ async def checkout_start(callback: CallbackQuery, state: FSMContext) -> None:
 		await callback.message.answer("Отправьте телефон или нажмите '📱 Поделиться контактом'", reply_markup=kb)
 	except Exception:
 		await _safe_edit(callback, "Отправьте телефон или нажмите '📱 Поделиться контактом'")
-	await callback.answer()
+	await _safe_answer(callback)
 
 
 @router.message(CheckoutStates.phone, F.contact)
@@ -508,5 +667,244 @@ async def checkout_confirm(message: Message, state: FSMContext) -> None:
 			await message.bot.send_message(mid, text, reply_markup=kb.as_markup())
 		except Exception:
 			pass
+
+
+@router.callback_query(F.data.startswith("flavor:select:"))
+async def flavor_select(callback: CallbackQuery) -> None:
+	# data format: flavor:select:<product_id>:<qty>
+	parts = (callback.data or "").split(":")
+	product_id = int(parts[2])
+	qty = int(parts[3]) if len(parts) > 3 else 1
+	
+	async with SessionLocal() as session:
+		product = await _load_product(session, product_id)
+		if not product:
+			await _safe_edit(callback, "Товар не найден.")
+			await _safe_answer(callback)
+			return
+		
+		# Get available flavors
+		from app.models.flavor import Flavor
+		flavors_res = await session.execute(select(Flavor).where(Flavor.product_id == product_id, Flavor.is_available == True))
+		flavors = list(flavors_res.scalars().all())
+		
+		if not flavors:
+			await _safe_edit(callback, "Вкусы не найдены.")
+			await _safe_answer(callback)
+			return
+	
+	# Create flavor selection keyboard
+	from aiogram.utils.keyboard import InlineKeyboardBuilder
+	from aiogram.types import InlineKeyboardButton
+	
+	builder = InlineKeyboardBuilder()
+	for flavor in flavors:
+		# Pass current quantity to preserve it when selecting flavor
+		builder.row(InlineKeyboardButton(text=f"🍃 {flavor.name}", callback_data=f"flavor:choose:{product_id}:{flavor.id}:{qty}"))
+	
+	builder.row(InlineKeyboardButton(text="⬅️ Назад к товару", callback_data=f"product:{product_id}"))
+	
+	await _safe_edit(callback, f"Выберите вкус для товара '{product.title}':", reply_markup=builder.as_markup())
+	await _safe_answer(callback)
+
+
+@router.callback_query(F.data.startswith("flavor:choose:"))
+async def flavor_choose(callback: CallbackQuery) -> None:
+	# data format: flavor:choose:<product_id>:<flavor_id>:<qty>
+	parts = (callback.data or "").split(":")
+	product_id = int(parts[2])
+	flavor_id = int(parts[3])
+	qty = int(parts[4]) if len(parts) > 4 else 1
+	
+	async with SessionLocal() as session:
+		# Get product and flavor
+		product = await _load_product(session, product_id)
+		from app.models.flavor import Flavor
+		flavor_res = await session.execute(select(Flavor).where(Flavor.id == flavor_id, Flavor.product_id == product_id))
+		flavor = flavor_res.scalars().first()
+		
+		if not product or not flavor:
+			await callback.answer("Товар или вкус не найден", show_alert=True)
+			return
+	
+	# Show product with selected flavor and quantity controls
+	text_lines = _product_with_flavor_text(product, flavor, qty)
+	kb = flavor_selection_keyboard(product_id, flavor_id, qty=qty, enabled=getattr(product, "in_stock", True))
+	
+	# Check if message has photo or just text
+	if callback.message.photo:
+		# If message has photo, update caption
+		try:
+			await callback.message.edit_caption(caption="\n".join(text_lines), reply_markup=kb.as_markup())
+		except TelegramBadRequest:
+			# If edit_caption fails, try to send new photo message
+			try:
+				await callback.message.delete()
+				# Use product photo if available, otherwise use current message photo
+				photo_to_use = product.photo_file_id if product.photo_file_id else callback.message.photo[-1].file_id
+				await callback.message.bot.send_photo(
+					chat_id=callback.message.chat.id,
+					photo=photo_to_use, 
+					caption="\n".join(text_lines), 
+					reply_markup=kb.as_markup()
+				)
+			except Exception:
+				await _safe_edit(callback, "\n".join(text_lines), reply_markup=kb.as_markup())
+	else:
+		# If message is just text, but product has photo, send photo message
+		if product.photo_file_id:
+			try:
+				await callback.message.delete()
+				await callback.message.bot.send_photo(
+					chat_id=callback.message.chat.id,
+					photo=product.photo_file_id, 
+					caption="\n".join(text_lines), 
+					reply_markup=kb.as_markup()
+				)
+			except Exception:
+				await _safe_edit(callback, "\n".join(text_lines), reply_markup=kb.as_markup())
+		else:
+			# If message is just text, update text
+			await _safe_edit(callback, "\n".join(text_lines), reply_markup=kb.as_markup())
+	
+	await _safe_answer(callback)
+
+
+@router.callback_query(F.data.startswith("flavor:qty:"))
+async def flavor_qty_change(callback: CallbackQuery) -> None:
+	# data: flavor:qty:<inc|dec>:<product_id>:<flavor_id>:<qty>
+	parts = (callback.data or "").split(":")
+	action = parts[2]
+	product_id = int(parts[3])
+	flavor_id = int(parts[4])
+	qty = int(parts[5])
+	
+	if action == "inc":
+		qty += 1
+	elif action == "dec":
+		qty = max(1, qty - 1)
+	
+	async with SessionLocal() as session:
+		product = await _load_product(session, product_id)
+		from app.models.flavor import Flavor
+		flavor_res = await session.execute(select(Flavor).where(Flavor.id == flavor_id, Flavor.product_id == product_id))
+		flavor = flavor_res.scalars().first()
+		
+		if not product or not flavor:
+			await callback.answer("Товар или вкус не найден", show_alert=True)
+			return
+	
+	# Update keyboard with new quantity
+	text_lines = _product_with_flavor_text(product, flavor, qty)
+	kb = flavor_selection_keyboard(product_id, flavor_id, qty=qty, enabled=getattr(product, "in_stock", True))
+	
+	# Check if message has photo or just text
+	if callback.message.photo:
+		# If message has photo, update caption
+		try:
+			await callback.message.edit_caption(caption="\n".join(text_lines), reply_markup=kb.as_markup())
+		except TelegramBadRequest:
+			# If edit_caption fails, try to send new photo message
+			try:
+				await callback.message.delete()
+				# Use product photo if available, otherwise use current message photo
+				photo_to_use = product.photo_file_id if product.photo_file_id else callback.message.photo[-1].file_id
+				await callback.message.bot.send_photo(
+					chat_id=callback.message.chat.id,
+					photo=photo_to_use, 
+					caption="\n".join(text_lines), 
+					reply_markup=kb.as_markup()
+				)
+			except Exception:
+				await _safe_edit(callback, "\n".join(text_lines), reply_markup=kb.as_markup())
+	else:
+		# If message is just text, update text
+		try:
+			await callback.message.edit_text("\n".join(text_lines), reply_markup=kb.as_markup())
+		except TelegramBadRequest:
+			await _safe_edit(callback, "\n".join(text_lines), reply_markup=kb.as_markup())
+	
+	await _safe_answer(callback)
+
+
+@router.callback_query(F.data.startswith("flavor:add:"))
+async def flavor_add_to_cart(callback: CallbackQuery) -> None:
+	# data format: flavor:add:<product_id>:<flavor_id>:<qty>
+	parts = (callback.data or "").split(":")
+	product_id = int(parts[2])
+	flavor_id = int(parts[3])
+	qty = int(parts[4]) if len(parts) > 4 else 1
+	
+	async with SessionLocal() as session:
+		# Get product and flavor
+		product = await _load_product(session, product_id)
+		from app.models.flavor import Flavor
+		flavor_res = await session.execute(select(Flavor).where(Flavor.id == flavor_id, Flavor.product_id == product_id))
+		flavor = flavor_res.scalars().first()
+		
+		if not product or not flavor:
+			await callback.answer("Товар или вкус не найден", show_alert=True)
+			return
+		
+		# Add to cart with flavor
+		user_id = callback.from_user.id
+		
+		# Check if user exists, create if not
+		res_user = await session.execute(select(User).where(User.id == user_id))
+		if res_user.scalars().first() is None:
+			session.add(User(id=user_id))
+			await session.flush()
+		
+		# Get or create order
+		result = await session.execute(
+			select(Order).where(Order.user_id == user_id, Order.status == "new")
+		)
+		order = result.scalars().first()
+		if not order:
+			order = Order(user_id=user_id, status="new")
+			session.add(order)
+			await session.flush()
+		
+		# Check if item with same product and flavor already exists
+		item_res = await session.execute(
+			select(OrderItem).where(
+				OrderItem.order_id == order.id, 
+				OrderItem.product_id == product_id,
+				OrderItem.flavor_id == flavor_id
+			)
+		)
+		item = item_res.scalars().first()
+		
+		if item:
+			item.quantity += qty
+		else:
+			unit = _calc_price(product, qty)
+			item = OrderItem(
+				order_id=order.id, 
+				product_id=product_id, 
+				flavor_id=flavor_id,
+				quantity=qty, 
+				unit_price=unit
+			)
+			session.add(item)
+		
+		await session.commit()
+	
+	# Show confirmation message
+	from aiogram.utils.keyboard import InlineKeyboardBuilder
+	from aiogram.types import InlineKeyboardButton
+	
+	confirmation_text = f"✅ Товар '{product.title}' (вкус: {flavor.name}) добавлен в корзину!\n\nКоличество: {qty}\nЦена: {float(product.price):.2f}"
+	
+	builder = InlineKeyboardBuilder()
+	builder.row(InlineKeyboardButton(text="🛒 Перейти в корзину", callback_data="cart:view"))
+	builder.row(InlineKeyboardButton(text="🏷️ Продолжить покупки", callback_data="catalog:open"))
+	
+	await callback.message.bot.send_message(
+		chat_id=callback.message.chat.id,
+		text=confirmation_text, 
+		reply_markup=builder.as_markup()
+	)
+	await _safe_answer(callback)
 
 

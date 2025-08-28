@@ -8,6 +8,9 @@ class Category(Base):
 
 	id: Mapped[int] = mapped_column(primary_key=True)
 	name: Mapped[str] = mapped_column(String(128), unique=True)
+	
+	# Relationships
+	products: Mapped[list["Product"]] = relationship("Product", back_populates="category")
 
 
 class Product(Base):
@@ -27,5 +30,6 @@ class Product(Base):
 	
 	# Relationships
 	flavors: Mapped[list["Flavor"]] = relationship("Flavor", back_populates="product", cascade="all, delete-orphan")
+	category: Mapped["Category | None"] = relationship("Category", back_populates="products")
 
 

@@ -212,6 +212,9 @@ def admin_product_edit_keyboard(product_id: int) -> InlineKeyboardBuilder:
 		InlineKeyboardButton(text="🏷 Категория", callback_data=f"admin:edit:category:{product_id}"),
 	)
 	builder.row(
+		InlineKeyboardButton(text="🍃 Вкусы", callback_data=f"admin:edit:flavors:{product_id}"),
+	)
+	builder.row(
 		InlineKeyboardButton(text="🗃 В архив", callback_data=f"admin:product:delete:{product_id}"),
 	)
 	builder.row(
@@ -260,4 +263,29 @@ def info_item_keyboard() -> InlineKeyboardBuilder:
 		InlineKeyboardButton(text="⬅️ К разделу 'ℹ️ О нас'", callback_data="info:open"),
 		InlineKeyboardButton(text="🏠 Главная", callback_data="nav:home"),
 	)
+	return builder
+
+
+def admin_flavors_keyboard(product_id: int, flavors: list) -> InlineKeyboardBuilder:
+	builder = InlineKeyboardBuilder()
+	
+	# Show current flavors
+	if flavors:
+		for flavor in flavors:
+			builder.button(
+				text=f"🍃 {flavor.name} {'✅' if flavor.is_available else '❌'}", 
+				callback_data=f"admin:flavor:toggle:{product_id}:{flavor.id}"
+			)
+		builder.adjust(1)
+		builder.row(
+			InlineKeyboardButton(text="🗑 Удалить все", callback_data=f"admin:flavor:delete:{product_id}"),
+		)
+	else:
+		builder.button(text="➕ Добавить первый вкус", callback_data=f"admin:flavor:add:{product_id}")
+	
+	builder.row(
+		InlineKeyboardButton(text="➕ Добавить вкус", callback_data=f"admin:flavor:add:{product_id}"),
+		InlineKeyboardButton(text="↩️ Назад", callback_data=f"adminprod:{product_id}"),
+	)
+	
 	return builder

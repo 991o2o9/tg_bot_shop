@@ -10,7 +10,7 @@ from app.db.session import SessionLocal
 from app.models.product import Category, Product
 from app.models.flavor import Flavor
 from app.models.order import OrderItem
-from app.bot.keyboards.inline import admin_categories_keyboard, admin_menu_keyboard
+from app.bot.keyboards.inline import admin_categories_keyboard, admin_menu_keyboard, admin_flavors_keyboard
 
 
 router = Router(name="admin_products")
@@ -189,6 +189,11 @@ class AdminCategoryStates(StatesGroup):
 
 class AdminCategoryEditStates(StatesGroup):
 	rename = State()
+
+
+class AdminFlavorStates(StatesGroup):
+	add_name = State()
+	edit_name = State()
 
 
 @router.message(AdminCategoryStates.name)
@@ -500,6 +505,8 @@ async def admin_archived_delete_permanently(callback: CallbackQuery) -> None:
 	from sqlalchemy import delete as sa_delete
 	async with SessionLocal() as session:
 		async with session.begin():
+			# удалить связанные вкусы, чтобы не нарушить FK
+			await session.execute(sa_delete(Flavor).where(Flavor.product_id == pid))
 			# удалить связанные позиции заказов, чтобы не нарушить FK
 			await session.execute(sa_delete(OrderItem).where(OrderItem.product_id == pid))
 			# удалить сам товар
@@ -922,6 +929,140 @@ async def pc_category(callback: CallbackQuery, state: FSMContext) -> None:
 	
 	await state.clear()
 	await _safe_edit_cb(callback, f"✅ Товар '{data.get('title')}' успешно создан!", reply_markup=admin_menu_keyboard().as_markup())
+
+
+# --- Flavor management handlers ---
+
+@router.callback_query(F.data.startswith("admin:edit:flavors:"))
+async def admin_edit_flavors(callback: CallbackQuery) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await _safe_answer(callback)
+		return
+	try:
+		await _safe_answer(callback)
+	except Exception:
+		pass
+	
+	product_id = int((callback.data or "").rsplit(":", 1)[-1])
+	
+	async with SessionLocal() as session:
+		res = await session.execute(select(Flavor).where(Flavor.product_id == product_id).order_by(Flavor.name))
+		flavors = list(res.scalars().all())
+	
+	kb = admin_flavors_keyboard(product_id, flavors)
+	await _safe_edit_cb(callback, f"🍃 Управление вкусами товара", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("admin:flavor:add:"))
+async def admin_flavor_add_start(callback: CallbackQuery, state: FSMContext) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await _safe_answer(callback)
+		return
+	try:
+		await _safe_answer(callback)
+	except Exception:
+		pass
+	
+	product_id = int((callback.data or "").rsplit(":", 1)[-1])
+	await state.set_state(AdminFlavorStates.add_name)
+	await state.update_data(product_id=product_id)
+	await _safe_edit_cb(callback, "Введите название нового вкуса")
+
+
+@router.message(AdminFlavorStates.add_name)
+async def admin_flavor_add_save(message: Message, state: FSMContext) -> None:
+	if not _is_admin(message.from_user.id):  # type: ignore[union-attr]
+		return
+	
+	flavor_name = (message.text or "").strip()
+	if not flavor_name:
+		await message.answer("Название вкуса не может быть пустым. Введите ещё раз")
+		return
+	
+	data = await state.get_data()
+	product_id = int(data.get("product_id"))
+	
+	async with SessionLocal() as session:
+		async with session.begin():
+			# Check if flavor already exists for this product
+			existing = await session.execute(
+				select(Flavor).where(
+					Flavor.product_id == product_id,
+					Flavor.name == flavor_name
+				)
+			)
+			if existing.scalars().first():
+				await message.answer("Такой вкус уже существует для этого товара", reply_markup=admin_flavors_keyboard(product_id, []).as_markup())
+				await state.clear()
+				return
+			
+			# Create new flavor
+			flavor = Flavor(
+				name=flavor_name,
+				product_id=product_id,
+				is_available=True
+			)
+			session.add(flavor)
+			await session.commit()
+	
+	await state.clear()
+	await message.answer(f"✅ Вкус '{flavor_name}' добавлен!", reply_markup=admin_flavors_keyboard(product_id, []).as_markup())
+
+
+@router.callback_query(F.data.startswith("admin:flavor:toggle:"))
+async def admin_flavor_toggle(callback: CallbackQuery) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await _safe_answer(callback)
+		return
+	try:
+		await _safe_answer(callback)
+	except Exception:
+		pass
+	
+	parts = (callback.data or "").split(":")
+	product_id = int(parts[-2])
+	flavor_id = int(parts[-1])
+	
+	async with SessionLocal() as session:
+		async with session.begin():
+			res = await session.execute(select(Flavor).where(Flavor.id == flavor_id))
+			flavor = res.scalars().first()
+			if not flavor:
+				await _safe_edit_cb(callback, "Вкус не найден", reply_markup=admin_menu_keyboard().as_markup())
+				return
+			
+			# Toggle availability
+			flavor.is_available = not flavor.is_available
+			await session.commit()
+	
+	# Refresh flavors list
+	async with SessionLocal() as session:
+		res = await session.execute(select(Flavor).where(Flavor.product_id == product_id).order_by(Flavor.name))
+		flavors = list(res.scalars().all())
+	
+	kb = admin_flavors_keyboard(product_id, flavors)
+	await _safe_edit_cb(callback, f"🍃 Управление вкусами товара", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("admin:flavor:delete:"))
+async def admin_flavor_delete_all(callback: CallbackQuery) -> None:
+	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
+		await _safe_answer(callback)
+		return
+	try:
+		await _safe_answer(callback)
+	except Exception:
+		pass
+	
+	product_id = int((callback.data or "").rsplit(":", 1)[-1])
+	
+	async with SessionLocal() as session:
+		async with session.begin():
+			# Delete all flavors for this product
+			await session.execute(delete(Flavor).where(Flavor.product_id == product_id))
+			await session.commit()
+	
+	await _safe_edit_cb(callback, "🗑 Все вкусы товара удалены", reply_markup=admin_flavors_keyboard(product_id, []).as_markup())
 
 
 

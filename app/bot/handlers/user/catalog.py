@@ -451,8 +451,25 @@ async def nav_category(callback: CallbackQuery) -> None:
 	parts = (callback.data or "").split(":")  # type: ignore[union-attr]
 	category_id = int(parts[-1])
 	async with SessionLocal() as session:
-		res = await session.execute(select(Product).where(Product.category_id == category_id, Product.is_deleted == False).order_by(Product.title))
+		# Get category name first
+		cat_res = await session.execute(select(Category).where(Category.id == category_id))
+		category = cat_res.scalars().first()
+		if not category:
+			await _safe_edit(callback, "Категория не найдена.")
+			try:
+				await _safe_answer(callback)
+			except TelegramBadRequest:
+				pass
+			return
+		
+		# Get products
+		res = await session.execute(
+			select(Product)
+			.where(Product.category_id == category_id, Product.is_deleted == False)
+			.order_by(Product.title)
+		)
 		products = list(res.scalars().all())
+	
 	if not products:
 		await _safe_edit(callback, "В этой категории пока нет товаров.")
 		try:
@@ -461,16 +478,9 @@ async def nav_category(callback: CallbackQuery) -> None:
 			pass  # Ignore old query errors
 		return
 	
-	text_lines = [f"<b>Категория: {products[0].category.name}</b>", ""]
-	for product in products:
-		text_lines.append(f"📦 {product.title}")
-		if product.description:
-			text_lines.append(f"   {product.description[:100]}{'...' if len(product.description) > 100 else ''}")
-		text_lines.append("")
-	
-	from app.bot.keyboards.inline import category_products_keyboard as _kb
-	kb = _kb(products)
-	await _safe_edit(callback, "\n".join(text_lines), reply_markup=kb.as_markup())
+	from app.bot.keyboards.inline import products_keyboard_with_nav as _kb
+	kb = _kb([(p.id, p.title) for p in products], category_id)
+	await _safe_edit(callback, "Выберите товар:", reply_markup=kb.as_markup())
 	try:
 		await _safe_answer(callback)
 	except TelegramBadRequest:

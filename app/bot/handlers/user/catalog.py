@@ -448,6 +448,11 @@ async def nav_categories(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("nav:category:"))
 async def nav_category(callback: CallbackQuery) -> None:
+	# answer early so the spinner stops immediately
+	try:
+		await _safe_answer(callback)
+	except Exception:
+		pass
 	parts = (callback.data or "").split(":")  # type: ignore[union-attr]
 	category_id = int(parts[-1])
 	async with SessionLocal() as session:
@@ -480,7 +485,15 @@ async def nav_category(callback: CallbackQuery) -> None:
 	
 	from app.bot.keyboards.inline import products_keyboard_with_nav as _kb
 	kb = _kb([(p.id, p.title) for p in products], category_id)
-	await _safe_edit(callback, "Выберите товар:", reply_markup=kb.as_markup())
+	# If current message is a photo (product view), always replace with a text message
+	if callback.message.photo:
+		try:
+			await callback.message.delete()
+		except Exception:
+			pass
+		await callback.message.answer("Выберите товар:", reply_markup=kb.as_markup())
+	else:
+		await _safe_edit(callback, "Выберите товар:", reply_markup=kb.as_markup())
 	try:
 		await _safe_answer(callback)
 	except TelegramBadRequest:

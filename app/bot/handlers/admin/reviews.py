@@ -3,7 +3,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from aiogram.exceptions import TelegramBadRequest
 
 from app.core.config import settings
@@ -23,7 +23,7 @@ async def _safe_edit_cb(callback: CallbackQuery, text: str, reply_markup=None) -
 async def _safe_answer(callback: CallbackQuery) -> None:
 	"""Safely call callback.answer() with error handling for old queries."""
 	try:
-		await _safe_answer(callback)
+		await callback.answer()
 	except TelegramBadRequest:
 		pass  # Ignore old query errors
 
@@ -85,8 +85,7 @@ async def review_save(message: Message, state: FSMContext) -> None:
 	await message.answer("Отзыв добавлен", reply_markup=admin_menu_keyboard().as_markup())
 
 
-@router.callback_query(F.data == "admin:reviews")
-async def admin_reviews_list(callback: CallbackQuery) -> None:
+async def _show_review_page(callback: CallbackQuery, offset: int) -> None:
 	if not _is_admin(callback.from_user.id):  # type: ignore[union-attr]
 		await _safe_answer(callback)
 		return
@@ -95,43 +94,58 @@ async def admin_reviews_list(callback: CallbackQuery) -> None:
 	except Exception:
 		pass
 	async with SessionLocal() as session:
-		res = await session.execute(select(Review).order_by(Review.created_at.desc()).limit(10))
-		reviews = list(res.scalars().all())
-	if not reviews:
-		await _safe_edit_cb(callback, "Пока нет отзывов", reply_markup=admin_menu_keyboard().as_markup())
-		return
+		# total count
+		cnt_res = await session.execute(select(func.count(Review.id)))
+		total = int(cnt_res.scalar() or 0)
+		if total == 0:
+			await _safe_edit_cb(callback, "Пока нет отзывов", reply_markup=admin_menu_keyboard().as_markup())
+			return
+		# clamp offset
+		offset = max(0, min(offset, max(0, total - 1)))
+		# load one review by offset
+		rev_res = await session.execute(
+			select(Review).order_by(Review.created_at.desc()).offset(offset).limit(1)
+		)
+		rev = rev_res.scalars().first()
 	
-	# First show numbered list with descriptions
-	review_list = []
-	for i, r in enumerate(reviews, 1):
-		media_type_emoji = "🖼" if r.media_type == "photo" else "🎥"
-		caption_text = f" — {r.caption}" if r.caption else ""
-		review_list.append(f"{i}. {media_type_emoji} Отзыв #{r.id}{caption_text}")
-	
-	await _safe_edit_cb(callback, "Список отзывов:\n\n" + "\n".join(review_list))
-	
-	# Then show each review with delete button
 	from aiogram.utils.keyboard import InlineKeyboardBuilder
 	from aiogram.types import InlineKeyboardButton
-	
-	for i, r in enumerate(reviews, 1):
-		# Show review media
-		try:
-			if r.media_type == "photo":
-				await callback.message.answer_photo(r.file_id, caption=f"Отзыв #{r.id} (№{i} в списке)")
-			else:
-				await callback.message.answer_video(r.file_id, caption=f"Отзыв #{r.id} (№{i} в списке)")
-		except Exception:
-			pass
-	
-	# Add delete buttons for each review
-	builder = InlineKeyboardBuilder()
-	for i, r in enumerate(reviews, 1):
-		builder.row(
-			InlineKeyboardButton(text=f"🗑 Удалить отзыв №{i} (ID: {r.id})", callback_data=f"admin:review:del:{r.id}")
-		)
-	builder.row(InlineKeyboardButton(text="↩️ Назад", callback_data="admin:open"))
-	await callback.message.answer(f"Всего отзывов: {len(reviews)}. Удалите ненужные кнопками ниже:", reply_markup=builder.as_markup())
+	b = InlineKeyboardBuilder()
+	# nav buttons
+	prev_off = max(0, offset - 1)
+	next_off = min(total - 1, offset + 1)
+	if offset > 0:
+		b.button(text="◀️ Пред", callback_data=f"admin:reviews:page:{prev_off}")
+	if offset < total - 1:
+		b.button(text="▶️ След", callback_data=f"admin:reviews:page:{next_off}")
+	b.adjust(2)
+	# delete + back
+	b.row(InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin:review:del:{getattr(rev,'id',0)}:{offset}"))
+	b.row(InlineKeyboardButton(text="↩️ Назад", callback_data="admin:open"))
+
+	# render
+	caption = f"Отзыв {offset+1} из {total}\n" + (rev.caption or "")
+	try:
+		if rev.media_type == "photo":
+			await callback.message.delete()
+			await callback.message.answer_photo(rev.file_id, caption=caption, reply_markup=b.as_markup())
+		else:
+			await callback.message.delete()
+			await callback.message.answer_video(rev.file_id, caption=caption, reply_markup=b.as_markup())
+	except Exception:
+		await _safe_edit_cb(callback, caption or "Отзыв", reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data == "admin:reviews")
+async def admin_reviews_open(callback: CallbackQuery) -> None:
+	await _show_review_page(callback, 0)
+
+
+@router.callback_query(F.data.startswith("admin:reviews:page:"))
+async def admin_reviews_page(callback: CallbackQuery) -> None:
+	parts = (callback.data or "").split(":")
+	offset = int(parts[-1]) if parts and parts[-1].isdigit() else 0
+	await _show_review_page(callback, offset)
 	# already answered above
 
 
@@ -144,15 +158,13 @@ async def admin_review_delete(callback: CallbackQuery) -> None:
 		await _safe_answer(callback)
 	except Exception:
 		pass
-	review_id_str = (callback.data or "").rsplit(":", 1)[-1]
-	try:
-		review_id = int(review_id_str)
-	except ValueError:
-		await _safe_edit_cb(callback, "Некорректный ID отзыва", reply_markup=admin_menu_keyboard().as_markup())
-		return
+	parts = (callback.data or "").split(":")
+	review_id = int(parts[-2]) if len(parts) >= 2 else 0
+	offset = int(parts[-1]) if parts and parts[-1].isdigit() else 0
 	async with SessionLocal() as session:
 		await session.execute(delete(Review).where(Review.id == review_id))
 		await session.commit()
-	await _safe_edit_cb(callback, f"Отзыв #{review_id} удалён ✅", reply_markup=admin_menu_keyboard().as_markup())
+	# After delete, stay on the same offset index (now shows next item automatically)
+	await _show_review_page(callback, max(0, offset))
 
 

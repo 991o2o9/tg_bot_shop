@@ -671,11 +671,47 @@ async def checkout_confirm(message: Message, state: FSMContext) -> None:
 	await state.clear()
 	from app.bot.keyboards.inline import main_menu_keyboard as _main_kb
 	await message.answer("Заказ оформлен ✅", reply_markup=_main_kb(is_admin=False).as_markup())
-	text_lines = [f"Новый заказ #{order.id}", f"Телефон: {data.get('phone')}", ""]
-	for item, product in pairs:
-		text_lines.append(
-			f"{product.title} — {item.quantity} x {float(item.unit_price):.2f} = {float(item.unit_price) * item.quantity:.2f}"
+
+	# Build manager-friendly summary
+	client_name = (message.from_user.first_name or "") if message.from_user else ""
+	client_last = (message.from_user.last_name or "") if message.from_user else ""
+	fullname = (client_name + (" " + client_last if client_last else "")).strip() or "Клиент"
+
+	# Reload items with optional flavor for nicer formatting
+	from app.models.flavor import Flavor
+	async with SessionLocal() as session:
+		res_items = await session.execute(
+			select(OrderItem, Product, Flavor)
+				.join(Product, Product.id == OrderItem.product_id)
+				.outerjoin(Flavor, Flavor.id == OrderItem.flavor_id)
+				.where(OrderItem.order_id == order.id)
 		)
+		triples = list(res_items.all())
+
+	total_sum = 0.0
+	text_lines: list[str] = [
+		f"🆕 <b>Новый заказ #{order.id}</b>",
+		"",
+		f"👤 Клиент: {fullname} (id: {user_id})",
+		f"📞 Телефон: {data.get('phone')}",
+		"",
+		"📦 <b>Товары</b>:",
+	]
+	for idx, (item, product, flavor) in enumerate(triples, 1):
+		unit = float(item.unit_price)
+		sum_ = unit * int(item.quantity)
+		total_sum += sum_
+		text_lines.append(f"<b>{idx}.</b> {product.title}")
+		if flavor:
+			text_lines.append(f"   🍃 Вкус: {flavor.name}")
+		text_lines.append(f"   Кол-во: {item.quantity}")
+		text_lines.append(f"   Цена за шт: {unit:.2f}")
+		text_lines.append(f"   Сумма: {sum_:.2f}")
+		if idx < len(triples):
+			text_lines.append("")
+	text_lines.append("")
+	text_lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	text_lines.append(f"<b>ИТОГО: {total_sum:.2f}</b>")
 	text = "\n".join(text_lines)
 	from app.models.manager import Manager
 	async with SessionLocal() as session:

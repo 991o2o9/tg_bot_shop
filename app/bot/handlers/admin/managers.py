@@ -9,15 +9,25 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.manager import Manager
 from app.bot.keyboards.inline import admin_menu_keyboard
+from app.models.user import User
 
 
 router = Router(name="admin_managers")
 
 
 def _is_admin(user_id: int) -> bool:
-	if not settings.admin_ids:
-		return False
-	admin_id_set = {int(x.strip()) for x in settings.admin_ids.split(",") if x.strip()}
+	# Admins or listed managers have admin access to panel
+	admin_id_set = set()
+	if settings.admin_ids:
+		admin_id_set = {int(x.strip()) for x in settings.admin_ids.split(",") if x.strip()}
+	# Managers from DB
+	try:
+		from app.db.session import SessionLocal as _SL
+		import asyncio
+		# Use a quick sync check via cached managers list is not available; fallback to simple include check later in handlers
+		# Here we only check static admins to keep _is_admin fast; runtime checks will be done in handlers where session exists
+	except Exception:
+		pass
 	return user_id in admin_id_set
 
 
@@ -35,7 +45,7 @@ async def _safe_edit_cb(callback: CallbackQuery, text: str, reply_markup=None) -
 async def _safe_answer(callback: CallbackQuery) -> None:
 	"""Safely call callback.answer() with error handling for old queries."""
 	try:
-		await _safe_answer(callback)
+		await callback.answer()
 	except TelegramBadRequest:
 		pass  # Ignore old query errors
 
@@ -101,6 +111,16 @@ async def managers_add_save(message: Message, state: FSMContext) -> None:
 			m = Manager(user_id=uid)
 			session.add(m)
 		await session.commit()
+	# Also grant admin rights at runtime
+	try:
+		ids = []
+		if settings.admin_ids:
+			ids = [x.strip() for x in settings.admin_ids.split(",") if x.strip()]
+		if str(uid) not in ids:
+			ids.append(str(uid))
+		settings.admin_ids = ",".join(ids)
+	except Exception:
+		pass
 	await state.clear()
 	await message.answer("Менеджер добавлен", reply_markup=admin_menu_keyboard().as_markup())
 
@@ -121,6 +141,14 @@ async def managers_delete(message: Message) -> None:
 	async with SessionLocal() as session:
 		await session.execute(delete(Manager).where(Manager.user_id == uid))
 		await session.commit()
+	# Also revoke admin rights at runtime
+	try:
+		if settings.admin_ids:
+			ids = [x.strip() for x in settings.admin_ids.split(",") if x.strip()]
+			ids = [x for x in ids if x != str(uid)]
+			settings.admin_ids = ",".join(ids)
+	except Exception:
+		pass
 	await message.answer("Менеджер удалён", reply_markup=admin_menu_keyboard().as_markup())
 
 
@@ -142,6 +170,14 @@ async def managers_delete_cb(callback: CallbackQuery) -> None:
 	async with SessionLocal() as session:
 		await session.execute(delete(Manager).where(Manager.user_id == uid))
 		await session.commit()
+	# Also revoke admin rights at runtime
+	try:
+		if settings.admin_ids:
+			ids = [x.strip() for x in settings.admin_ids.split(",") if x.strip()]
+			ids = [x for x in ids if x != str(uid)]
+			settings.admin_ids = ",".join(ids)
+	except Exception:
+		pass
 	# refresh list
 	async with SessionLocal() as session:
 		res = await session.execute(select(Manager).order_by(Manager.id))
